@@ -1,0 +1,22 @@
+{
+  "name": "job-hunter-bot",
+  "version": "1.0.0",
+  "description": "24/7 Job Hunter Bot for Node.js + Remote roles",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "rss-parser": "^3.13.0",
+    "dotenv": "^16.3.1"
+  },
+  "keywords": [
+    "job",
+    "bot",
+    "nodejs",
+    "remote"
+  ],
+  "author": "Papu",
+  "license": "ISC"
+}

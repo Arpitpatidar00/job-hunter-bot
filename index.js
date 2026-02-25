@@ -1,142 +1,145 @@
-import Parser from 'rss-parser';
-import fs from 'fs';
-import path from 'path';
+#!/usr/bin/env node
+
+/**
+ * @module index
+ * @description Entry point for Job Hunter Bot — polls RSS feeds for relevant remote jobs
+ * and sends alerts to Discord/Telegram. Modular, configurable, production-ready.
+ */
+
 import 'dotenv/config';
+import { loadConfig } from './src/config.js';
+import logger from './src/logger.js';
+import { loadSeenJobs, saveSeenJobs, markSeen, hasSeen } from './src/storage.js';
+import { fetchAllFeeds } from './src/feeds.js';
+import { isJobRelevant, isNewJob } from './src/relevance.js';
+import { sendAlert } from './src/notifications.js';
 
-// Initialize RSS Parser
-const parser = new Parser();
+/** @type {Map<string, number>} */
+let seenJobs;
 
-// Config
-const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const SEEN_JOBS_FILE = 'seen_jobs.json';
+/** @type {Readonly<object>} */
+let config;
 
-// Feed URLs (add more as needed)
-// Using Remotive and WeWorkRemotely as examples since they are reliable RSS sources for devs.
-// Web3.career often requires an API key or custom scraping, so these are safer defaults.
-const FEEDS = [
-    'https://remotive.com/remote-jobs/software-dev/feed',
-    'https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss',
-    'https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss'
-];
+/** @type {NodeJS.Timeout|null} */
+let pollTimer = null;
 
-// Keywords to filter for (OR logic usually, but here we want matches)
-const MUST_HAVE_KEYWORDS = ['node', 'typescript', 'backend', 'full stack', 'engineer'];
-const LOCATION_KEYWORDS = ['remote']; // Usually implicit in these feeds, but good to check.
-
-// Load seen jobs from file to avoid duplicates on restart
-let seenJobs = new Set();
-try {
-    if (fs.existsSync(SEEN_JOBS_FILE)) {
-        const data = fs.readFileSync(SEEN_JOBS_FILE, 'utf8');
-        seenJobs = new Set(JSON.parse(data));
-        console.log(`Loaded ${seenJobs.size} seen jobs from history.`);
-    }
-} catch (err) {
-    console.error('Error loading seen jobs:', err);
-}
-
-// Helper to save seen jobs
-function saveSeenJobs() {
-    try {
-        fs.writeFileSync(SEEN_JOBS_FILE, JSON.stringify([...seenJobs], null, 2));
-    } catch (err) {
-        console.error('Error saving seen jobs:', err);
-    }
-}
-
-// Function to send alert (Discord or Telegram)
-async function sendAlert(job) {
-    const message = `🚨 **New Job Alert!** 🚨\n\n**${job.title}**\n${job.link}\n\n*Posted: ${job.pubDate}*`;
-
-    // 1. Discord Webhook
-    if (DISCORD_WEBHOOK_URL) {
-        try {
-            await fetch(DISCORD_WEBHOOK_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: message })
-            });
-            console.log(`Sent Discord alert for: ${job.title}`);
-        } catch (error) {
-            console.error('Failed to send Discord alert:', error);
-        }
-    }
-
-    // 2. Telegram Bot
-    if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
-        try {
-            const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-            await fetch(telegramUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: TELEGRAM_CHAT_ID,
-                    text: message.replace(/\*\*/g, '*'), // Telegram uses * for bold in Markdown
-                    parse_mode: 'Markdown'
-                })
-            });
-            console.log(`Sent Telegram alert for: ${job.title}`);
-        } catch (error) {
-            console.error('Failed to send Telegram alert:', error);
-        }
-    }
-
-    if (!DISCORD_WEBHOOK_URL && !TELEGRAM_BOT_TOKEN) {
-        console.log(`[Mock Alert] New Job: ${job.title} - ${job.link}`);
-    }
-}
-
-// Main polling function
+/**
+ * Run a single poll cycle: fetch feeds, check relevance, send alerts, save state.
+ */
 async function checkFeeds() {
-    console.log(`Checking feeds at ${new Date().toISOString()}...`);
-    let newJobsCount = 0;
+    logger.info(`🔍 Checking feeds at ${new Date().toISOString()}...`);
 
-    for (const feedUrl of FEEDS) {
-        try {
-            const feed = await parser.parseURL(feedUrl);
-            
-            for (const item of feed.items) {
-                // Check if already seen (using GUID or Link as unique ID)
+    const stats = { totalItems: 0, newRelevant: 0, alertsSent: 0, alertsFailed: 0, feedErrors: 0 };
+
+    try {
+        const feedResults = await fetchAllFeeds(config.feeds, config);
+
+        for (const result of feedResults) {
+            if (result.error) {
+                stats.feedErrors++;
+                continue;
+            }
+
+            for (const item of result.items) {
+                stats.totalItems++;
                 const id = item.guid || item.link;
-                if (seenJobs.has(id)) continue;
+                if (!id) continue;
 
-                // Filter Logic
-                const title = (item.title || '').toLowerCase();
-                const content = (item.content || item.contentSnippet || '').toLowerCase();
-                const combinedText = `${title} ${content}`;
+                if (hasSeen(seenJobs, id)) continue;
 
-                // Check for "Remote" (usually in title/feed, but explicit check is good)
-                // And check for Node/TS related terms
-                const isRelevant = MUST_HAVE_KEYWORDS.some(keyword => combinedText.includes(keyword));
-                
-                if (isRelevant) {
-                    // New relevant job found!
-                    seenJobs.add(id);
-                    newJobsCount++;
-                    await sendAlert(item);
+                if (isNewJob(item, config.timeWindowHours) && isJobRelevant(item, config)) {
+                    markSeen(seenJobs, id);
+                    stats.newRelevant++;
+
+                    const alertStats = await sendAlert(item, { dryRun: config.dryRun, config });
+                    stats.alertsSent += alertStats.sent;
+                    stats.alertsFailed += alertStats.failed;
                 } else {
-                    // Mark as seen so we don't re-process logic every time, even if ignored
-                    seenJobs.add(id);
+                    // Mark non-relevant or old jobs as seen to avoid re-checking
+                    markSeen(seenJobs, id);
                 }
             }
-        } catch (error) {
-            console.error(`Error fetching feed ${feedUrl}:`, error.message);
         }
-    }
 
-    if (newJobsCount > 0) {
-        saveSeenJobs();
-        console.log(`Found ${newJobsCount} new relevant jobs.`);
-    } else {
-        console.log('No new relevant jobs found.');
+        // Save seen jobs after processing
+        saveSeenJobs(config.seenJobsFile, seenJobs);
+
+        // Health check log
+        logger.info(
+            `✅ Poll complete | Items: ${stats.totalItems} | New relevant: ${stats.newRelevant} | ` +
+            `Alerts sent: ${stats.alertsSent} | Alerts failed: ${stats.alertsFailed} | ` +
+            `Feed errors: ${stats.feedErrors}`
+        );
+    } catch (err) {
+        logger.error(`Fatal error during feed check: ${err.message}`, { stack: err.stack });
+        // Save what we have so far
+        try { saveSeenJobs(config.seenJobsFile, seenJobs); } catch { /* last resort */ }
     }
 }
 
-// Start
-console.log('🤖 Job Hunter Bot started!');
-console.log(`Filters: ${MUST_HAVE_KEYWORDS.join(', ')}`);
-checkFeeds(); // Initial check
-setInterval(checkFeeds, POLL_INTERVAL_MS); // Schedule
+/**
+ * Graceful shutdown handler — save state and exit.
+ * @param {string} signal - The signal that triggered shutdown.
+ */
+function gracefulShutdown(signal) {
+    logger.info(`Received ${signal}. Saving seen jobs and shutting down...`);
+    if (pollTimer) clearInterval(pollTimer);
+    try {
+        saveSeenJobs(config.seenJobsFile, seenJobs);
+    } catch (err) {
+        logger.error(`Failed to save during shutdown: ${err.message}`);
+    }
+    logger.info('👋 Job Hunter Bot stopped. Goodbye!');
+    process.exit(0);
+}
+
+/**
+ * Main entry point.
+ */
+async function main() {
+    try {
+        // Load configuration (config.json + CLI args)
+        config = loadConfig();
+        logger.info('📋 Configuration loaded successfully.');
+        logger.info(`   Feeds: ${config.feeds.length} | Keywords: ${config.profileKeywords.length} | ` +
+            `Interval: ${config.pollIntervalMs / 1000}s | Time window: ${config.timeWindowHours}h`);
+        if (config.dryRun) {
+            logger.info('🧪 DRY RUN mode enabled — alerts will be logged but not sent.');
+        }
+
+        // Load seen jobs from storage
+        seenJobs = loadSeenJobs(config.seenJobsFile);
+
+        // Register graceful shutdown handlers
+        process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+        process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+        // Catch unhandled errors to prevent crashes
+        process.on('uncaughtException', (err) => {
+            logger.error(`Uncaught exception: ${err.message}`, { stack: err.stack });
+            try { saveSeenJobs(config.seenJobsFile, seenJobs); } catch { /* last resort */ }
+        });
+        process.on('unhandledRejection', (reason) => {
+            logger.error(`Unhandled rejection: ${reason}`);
+        });
+
+        // Start polling
+        logger.info('🤖 Job Hunter Bot started!');
+        await checkFeeds(); // Initial check
+
+        pollTimer = setInterval(async () => {
+            try {
+                await checkFeeds();
+            } catch (err) {
+                logger.error(`Poll cycle error: ${err.message}`, { stack: err.stack });
+            }
+        }, config.pollIntervalMs);
+
+    } catch (err) {
+        // Config loading or startup failure
+        console.error(`❌ Startup failed: ${err.message}`);
+        process.exit(1);
+    }
+}
+
+main();

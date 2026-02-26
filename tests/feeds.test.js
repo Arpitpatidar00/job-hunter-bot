@@ -9,6 +9,9 @@ jest.unstable_mockModule('../src/logger.js', () => ({
         info: jest.fn(),
         warn: jest.fn(),
         error: jest.fn(),
+        evaluated: jest.fn(),
+        skipped: jest.fn(),
+        notified: jest.fn(),
     },
 }));
 

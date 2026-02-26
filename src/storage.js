@@ -72,7 +72,7 @@ export function saveSeenJobs(filePath, seenJobs) {
         // Rename temp → actual (atomic on most OS)
         fs.renameSync(tmpPath, resolved);
 
-        logger.info(`Saved ${seenJobs.size} seen jobs (backup at ${path.basename(backupPath)}).`);
+        // Silent save — summary logged by index.js
     } catch (err) {
         logger.error(`Failed to save seen jobs to "${resolved}": ${err.message}`);
         // Clean up temp file if it exists

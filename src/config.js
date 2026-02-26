@@ -1,6 +1,7 @@
 /**
  * @module config
  * @description Loads configuration from config.json, validates with Joi, and merges CLI overrides via yargs.
+ * Supports the full weighted-scoring config schema (searchRules, weights, synonyms, etc.).
  */
 
 import fs from 'fs';
@@ -15,9 +16,57 @@ import { parseInterval } from './utils.js';
  */
 const configSchema = Joi.object({
     feeds: Joi.array().items(Joi.string().uri()).min(1).required(),
-    profileKeywords: Joi.array().items(Joi.string()).min(1).required(),
-    locationKeywords: Joi.array().items(Joi.string()).min(1).required(),
+
+    // ── Scoring search rules ────────────────────────────────────────────
+    searchRules: Joi.object({
+        mustMatch: Joi.array().items(Joi.string()).default([]),
+        shouldMatch: Joi.array().items(Joi.string()).default([]),
+        niceToHave: Joi.array().items(Joi.string()).default([]),
+        exclude: Joi.array().items(Joi.string()).default([]),
+    }).default({ mustMatch: [], shouldMatch: [], niceToHave: [], exclude: [] }),
+
+    targetRoles: Joi.array().items(Joi.string()).default([]),
+    experienceLevel: Joi.array().items(Joi.string()).default([]),
+
+    synonyms: Joi.object().pattern(Joi.string(), Joi.array().items(Joi.string())).default({}),
+
+    // ── Weighted scoring ────────────────────────────────────────────────
+    weights: Joi.object({
+        titleMatch: Joi.number().min(0).max(100).default(30),
+        skillsMatch: Joi.number().min(0).max(100).default(30),
+        techStackMatch: Joi.number().min(0).max(100).default(20),
+        locationMatch: Joi.number().min(0).max(100).default(10),
+        salaryMatch: Joi.number().min(0).max(100).default(10),
+    }).default(),
+
+    scoringBonuses: Joi.object({
+        nextjsAndTypescript: Joi.number().default(8),
+        nodeAndMongodb: Joi.number().default(6),
+        awsPresent: Joi.number().default(4),
+        fullMernStack: Joi.number().default(10),
+        remoteIndia: Joi.number().default(5),
+    }).default(),
+
+    scoringPenalties: Joi.object({
+        nonJsStack: Joi.number().max(0).default(-15),
+        frontendOnlyNoBackend: Joi.number().max(0).default(-5),
+        differentPrimaryLanguage: Joi.number().max(0).default(-10),
+    }).default(),
+
+    notificationThreshold: Joi.number().integer().min(0).max(100).default(65),
+
+    // ── Filters ─────────────────────────────────────────────────────────
+    filters: Joi.object({
+        workPreference: Joi.array().items(Joi.string()).default(['remote']),
+        locations: Joi.array().items(Joi.string()).default([]),
+        minSalaryUSD: Joi.number().min(0).default(0),
+        minPrimaryMatches: Joi.number().integer().min(0).default(3),
+    }).default(),
+
+    locationKeywords: Joi.array().items(Joi.string()).min(1).default(['remote']),
     regexKeywords: Joi.array().items(Joi.string()).default([]),
+
+    // ── Operational ─────────────────────────────────────────────────────
     pollIntervalMs: Joi.number().integer().positive().min(10000).required(),
     timeWindowHours: Joi.number().positive().required(),
     fuzzyThreshold: Joi.number().min(0).max(1).required(),

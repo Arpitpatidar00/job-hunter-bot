@@ -2,8 +2,8 @@
 
 /**
  * @module index
- * @description Entry point for Job Hunter Bot — polls RSS feeds for relevant remote jobs
- * and sends alerts to Discord/Telegram. Modular, configurable, production-ready.
+ * @description Entry point for Job Hunter Bot — polls RSS feeds for relevant remote jobs,
+ * scores them 0–100, and sends color-coded alerts to Discord/Telegram.
  */
 
 import 'dotenv/config';
@@ -11,7 +11,7 @@ import { loadConfig } from './src/config.js';
 import logger from './src/logger.js';
 import { loadSeenJobs, saveSeenJobs, markSeen, hasSeen } from './src/storage.js';
 import { fetchAllFeeds } from './src/feeds.js';
-import { isJobRelevant, isNewJob } from './src/relevance.js';
+import { scoreJob, isNewJob } from './src/relevance.js';
 import { sendAlert } from './src/notifications.js';
 
 /** @type {Map<string, number>} */
@@ -24,12 +24,13 @@ let config;
 let pollTimer = null;
 
 /**
- * Run a single poll cycle: fetch feeds, check relevance, send alerts, save state.
+ * Run a single poll cycle: fetch feeds, score jobs, send alerts for high-quality matches.
  */
 async function checkFeeds() {
-    logger.info(`🔍 Checking feeds at ${new Date().toISOString()}...`);
+    logger.info(`Checking feeds at ${new Date().toISOString()}...`);
 
-    const stats = { totalItems: 0, newRelevant: 0, alertsSent: 0, alertsFailed: 0, feedErrors: 0 };
+    const stats = { totalItems: 0, evaluated: 0, notified: 0, skipped: 0, excluded: 0, alertsFailed: 0, feedErrors: 0 };
+    const threshold = config.notificationThreshold ?? 50;
 
     try {
         const feedResults = await fetchAllFeeds(config.feeds, config);
@@ -47,32 +48,52 @@ async function checkFeeds() {
 
                 if (hasSeen(seenJobs, id)) continue;
 
-                if (isNewJob(item, config.timeWindowHours) && isJobRelevant(item, config)) {
-                    markSeen(seenJobs, id);
-                    stats.newRelevant++;
+                // Always mark as seen to avoid re-processing
+                markSeen(seenJobs, id);
 
-                    const alertStats = await sendAlert(item, { dryRun: config.dryRun, config });
-                    stats.alertsSent += alertStats.sent;
-                    stats.alertsFailed += alertStats.failed;
-                } else {
-                    // Mark non-relevant or old jobs as seen to avoid re-checking
-                    markSeen(seenJobs, id);
+                // Time window check
+                if (!isNewJob(item, config.timeWindowHours)) continue;
+
+                // Score the job
+                const scoreResult = scoreJob(item, config);
+                stats.evaluated++;
+
+                // Excluded jobs — silent skip
+                if (scoreResult.excluded) {
+                    stats.excluded++;
+                    continue;
                 }
+
+                // Below threshold — silent skip
+                if (scoreResult.score < threshold) {
+                    stats.skipped++;
+                    continue;
+                }
+
+                // Log only jobs that pass the threshold
+                logger.evaluated(item, scoreResult);
+
+                // Send alert with score data
+                const alertStats = await sendAlert(item, scoreResult, {
+                    dryRun: config.dryRun,
+                    config,
+                });
+                stats.notified += alertStats.sent;
+                stats.alertsFailed += alertStats.failed;
             }
         }
 
         // Save seen jobs after processing
         saveSeenJobs(config.seenJobsFile, seenJobs);
 
-        // Health check log
+        // Clean summary — one line, everything you need
         logger.info(
-            `✅ Poll complete | Items: ${stats.totalItems} | New relevant: ${stats.newRelevant} | ` +
-            `Alerts sent: ${stats.alertsSent} | Alerts failed: ${stats.alertsFailed} | ` +
-            `Feed errors: ${stats.feedErrors}`
+            `Poll complete | Feeds: ${config.feeds.length} (${stats.feedErrors} failed) | ` +
+            `Items: ${stats.totalItems} | Evaluated: ${stats.evaluated} | ` +
+            `Matched: ${stats.notified} | Excluded: ${stats.excluded} | Skipped: ${stats.skipped}`
         );
     } catch (err) {
         logger.error(`Fatal error during feed check: ${err.message}`, { stack: err.stack });
-        // Save what we have so far
         try { saveSeenJobs(config.seenJobsFile, seenJobs); } catch { /* last resort */ }
     }
 }
@@ -89,7 +110,7 @@ function gracefulShutdown(signal) {
     } catch (err) {
         logger.error(`Failed to save during shutdown: ${err.message}`);
     }
-    logger.info('👋 Job Hunter Bot stopped. Goodbye!');
+    logger.info('Job Hunter Bot stopped.');
     process.exit(0);
 }
 
@@ -100,11 +121,13 @@ async function main() {
     try {
         // Load configuration (config.json + CLI args)
         config = loadConfig();
-        logger.info('📋 Configuration loaded successfully.');
-        logger.info(`   Feeds: ${config.feeds.length} | Keywords: ${config.profileKeywords.length} | ` +
-            `Interval: ${config.pollIntervalMs / 1000}s | Time window: ${config.timeWindowHours}h`);
+        logger.info('Configuration loaded successfully.');
+        logger.info(
+            `Feeds: ${config.feeds.length} | Threshold: ${config.notificationThreshold} | ` +
+            `Interval: ${config.pollIntervalMs / 1000}s | Time window: ${config.timeWindowHours}h`
+        );
         if (config.dryRun) {
-            logger.info('🧪 DRY RUN mode enabled — alerts will be logged but not sent.');
+            logger.info('DRY RUN mode enabled — alerts will be logged but not sent.');
         }
 
         // Load seen jobs from storage
@@ -124,7 +147,7 @@ async function main() {
         });
 
         // Start polling
-        logger.info('🤖 Job Hunter Bot started!');
+        logger.info('Job Hunter Bot started.');
         await checkFeeds(); // Initial check
 
         pollTimer = setInterval(async () => {

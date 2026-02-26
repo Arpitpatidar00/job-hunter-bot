@@ -1,7 +1,6 @@
 {
     "feeds": [
         "https://jobscollider.com/remote-jobs.rss",
-        "https://remoteyeah.com/rss.xml",
         "https://hireweb3.io/job/rss",
         "https://empllo.com/feeds/remote-engineering-jobs.rss",
         "https://empllo.com/feeds/remote-devops-jobs.rss",
@@ -17,49 +16,213 @@
         "https://himalayas.app/jobs/rss",
         "https://4dayweek.io/rss",
         "https://app.vuejobs.com/feed/posts",
-        "https://larajobs.com/feed",
         "https://dribbble.com/jobs.rss",
-        "https://hasjob.co/feed"
+        "https://hasjob.co/feed",
+        "https://remoteok.io/remote-jobs.rss",
+        "https://www.fossjobs.net/rss/all/",
+        "https://cryptojobslist.com/jobs.rss",
+        "https://cryptocurrencyjobs.co/index.xml",
+        "https://jobspresso.co/feed/?post_type=job_listing",
+        "https://remoteworkhub.com/feed/?post_type=job",
+        "https://landing.jobs/feed?remote=true"
     ],
-    "profileKeywords": [
-        "javascript",
-        "typescript",
-        "react",
-        "next.js",
-        "redux",
-        "context api",
-        "mui",
-        "shadcn",
-        "node.js",
-        "express",
-        "rest",
-        "websocket",
-        "graphql",
-        "mvc",
-        "mongodb",
-        "supabase",
-        "aws",
-        "nx monorepo",
-        "stripe",
-        "razorpay",
-        "nodemailer",
-        "sendgrid",
-        "jwt",
-        "oauth",
-        "full-stack",
-        "backend",
-        "frontend",
-        "devops",
+    "searchRules": {
+        "mustMatch": [
+            "javascript",
+            "typescript",
+            "react",
+            "next.js",
+            "node.js"
+        ],
+        "shouldMatch": [
+            "mongodb",
+            "postgresql",
+            "express",
+            "graphql",
+            "rest api",
+            "aws",
+            "docker",
+            "tailwindcss",
+            "prisma",
+            "nestjs"
+        ],
+        "niceToHave": [
+            "redis",
+            "ci/cd",
+            "microservices",
+            "system design",
+            "nx monorepo",
+            "kubernetes",
+            "terraform",
+            "github actions",
+            "jest",
+            "cypress"
+        ],
+        "exclude": [
+            "wordpress",
+            "php",
+            "laravel",
+            "drupal",
+            "dotnet",
+            ".net",
+            "c#",
+            "swift developer",
+            "android native",
+            "kotlin developer",
+            "flutter",
+            "java developer",
+            "spring boot",
+            "ruby on rails",
+            "django",
+            "unpaid internship"
+        ]
+    },
+    "targetRoles": [
+        "full stack developer",
+        "full stack engineer",
+        "fullstack developer",
+        "fullstack engineer",
+        "mern stack developer",
+        "mern stack engineer",
+        "next.js developer",
+        "next.js engineer",
+        "frontend engineer",
+        "frontend developer",
+        "frontend react developer",
+        "backend engineer",
+        "backend developer",
+        "backend engineer node.js",
         "software engineer",
-        "engineer"
+        "software developer",
+        "web developer",
+        "web engineer",
+        "javascript developer",
+        "javascript engineer",
+        "typescript developer",
+        "react developer",
+        "react engineer",
+        "node.js developer",
+        "node.js engineer"
     ],
+    "experienceLevel": [
+        "entry level",
+        "junior",
+        "associate",
+        "mid-level",
+        "mid",
+        "sde 1",
+        "sde 2",
+        "1+ years",
+        "2+ years",
+        "3+ years",
+        "4+ years"
+    ],
+    "synonyms": {
+        "react": [
+            "reactjs",
+            "react.js"
+        ],
+        "next.js": [
+            "nextjs",
+            "next js",
+            "next.js"
+        ],
+        "node.js": [
+            "nodejs",
+            "node js",
+            "node.js"
+        ],
+        "typescript": [
+            "ts",
+            "typescript"
+        ],
+        "javascript": [
+            "js",
+            "ecmascript",
+            "es6",
+            "es2015"
+        ],
+        "mongodb": [
+            "mongo",
+            "mongoose"
+        ],
+        "postgresql": [
+            "postgres",
+            "psql"
+        ],
+        "express": [
+            "expressjs",
+            "express.js"
+        ],
+        "graphql": [
+            "graph ql"
+        ],
+        "aws": [
+            "amazon web services"
+        ],
+        "docker": [
+            "containerization"
+        ],
+        "tailwindcss": [
+            "tailwind",
+            "tailwind css"
+        ],
+        "nestjs": [
+            "nest.js",
+            "nest js"
+        ]
+    },
+    "weights": {
+        "titleMatch": 30,
+        "skillsMatch": 30,
+        "techStackMatch": 20,
+        "locationMatch": 10,
+        "salaryMatch": 10
+    },
+    "scoringBonuses": {
+        "nextjsAndTypescript": 8,
+        "nodeAndMongodb": 6,
+        "awsPresent": 4,
+        "fullMernStack": 10,
+        "remoteIndia": 5
+    },
+    "scoringPenalties": {
+        "nonJsStack": -15,
+        "frontendOnlyNoBackend": -5,
+        "differentPrimaryLanguage": -10
+    },
+    "notificationThreshold": 50,
+    "filters": {
+        "workPreference": [
+            "remote",
+            "remote-first",
+            "distributed",
+            "work from home",
+            "wfh",
+            "anywhere"
+        ],
+        "locations": [
+            "india",
+            "europe",
+            "worldwide",
+            "global",
+            "anywhere"
+        ],
+        "minSalaryUSD": 25000,
+        "minPrimaryMatches": 1
+    },
     "locationKeywords": [
-        "remote"
+        "remote",
+        "remote-first",
+        "distributed",
+        "work from home",
+        "wfh",
+        "anywhere"
     ],
     "regexKeywords": [],
     "pollIntervalMs": 900000,
     "timeWindowHours": 24,
-    "fuzzyThreshold": 0.8,
+    "fuzzyThreshold": 0.82,
     "maxConcurrentFeeds": 7,
     "maxRetries": 3,
     "seenJobsFile": "seen_jobs.json"

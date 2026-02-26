@@ -32,13 +32,6 @@ const parser = new Parser({
 export async function fetchAllFeeds(feedUrls, config) {
     const limit = pLimit(config.maxConcurrentFeeds);
 
-    // Warn about non-HTTPS feeds
-    for (const url of feedUrls) {
-        if (url.startsWith('http://')) {
-            logger.warn(`Feed URL uses HTTP (insecure): ${url}`);
-        }
-    }
-
     const promises = feedUrls.map((feedUrl) =>
         limit(() => fetchSingleFeed(feedUrl, config.maxRetries))
     );
@@ -83,10 +76,10 @@ async function fetchSingleFeed(feedUrl, maxRetries) {
             creator: item.creator || item['dc:creator'] || '',
         }));
 
-        logger.info(`Fetched ${items.length} items from ${feedUrl}`);
+        // Silently return — summary logged by index.js
         return { feedUrl, items };
     } catch (err) {
-        logger.error(`Failed to fetch feed "${feedUrl}" after retries: ${err.message}`);
+        logger.warn(`Feed failed: ${feedUrl} — ${err.message}`);
         return { feedUrl, items: [], error: err.message };
     }
 }

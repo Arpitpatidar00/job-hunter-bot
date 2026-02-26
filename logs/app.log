@@ -1,0 +1,12 @@
+{"level":"info","message":"Configuration loaded successfully.","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"Feeds: 25 | Threshold: 50 | Interval: 900s | Time window: 24h","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"DRY RUN mode enabled — alerts will be logged but not sent.","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"No existing seen jobs file at \"/Users/devarpit/Desktop/Projects/job-hunter-bot/seen_jobs.json\", starting fresh.","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"Job Hunter Bot started.","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"Checking feeds at 2026-02-26T15:49:48.250Z...","service":"job-hunter-bot","timestamp":"2026-02-26 21:19:48"}
+{"level":"info","message":"Evaluated: Senior Fullstack Engineer at Stash @ Unknown\n  Match Score: 79 (Strong Match)\n  Reason: Title: \"fullstack engineer\" + Must-match skills (4): javascript, typescript, react, node.js + Should-match skills (3): postgresql, aws, docker + Nice-to-have (3): ci/cd, kubernetes, terraform","service":"job-hunter-bot","timestamp":"2026-02-26 21:20:01"}
+{"level":"info","message":"[DRY RUN] Would send alert: 🟡 Strong Match (79%) — Senior Fullstack Engineer at Stash — https://remotefirstjobs.com/companies/stash/jobs/senior-fullstack-engineer-715161","service":"job-hunter-bot","timestamp":"2026-02-26 21:20:01"}
+{"level":"info","message":"Evaluated: Senior AI Software Engineer at Conversica @ Unknown\n  Match Score: 50 (Weak Match)\n  Reason: Title: \"software engineer\" + Should-match skills (2): postgresql, aws + Nice-to-have (2): system design, terraform + Location/remote match","service":"job-hunter-bot","timestamp":"2026-02-26 21:20:01"}
+{"level":"info","message":"[DRY RUN] Would send alert: 🟣 Weak Match (50%) — Senior AI Software Engineer at Conversica — https://remotefirstjobs.com/companies/conversica/jobs/senior-ai-software-engineer-715150","service":"job-hunter-bot","timestamp":"2026-02-26 21:20:01"}
+{"level":"info","message":"Poll complete | Feeds: 25 (0 failed) | Items: 2544 | Evaluated: 321 | Matched: 2 | Excluded: 14 | Skipped: 305","service":"job-hunter-bot","timestamp":"2026-02-26 21:20:02"}
+{"level":"info","message":"Received SIGINT. Saving seen jobs and shutting down...","service":"job-hunter-bot","timestamp":"2026-02-26 21:21:08"}

@@ -34,6 +34,7 @@ import {
     getAndIncrementCycle, recalculatePriorities,
     getSourcesForCycle, recordSourceYield
 } from './intelligence/sourceIntelligence.js';
+import { incrementDailyMetrics, sendDailyReport, getDailyReportData, formatDailyReport } from './intelligence/dailyReport.js';
 
 // Intelligence modules
 import { isFeedCircuitOpen, recordFeedResult } from './intelligence/feedHealth.js';
@@ -100,9 +101,11 @@ async function processFeeds(messages, env) {
     const { jobs, feedStats, totalItems, totalErrors } = await runAllConnectors(batchConfig);
 
     // Record circuit breaker metrics
+    let crawlSuccesses = 0;
+    let crawlFailures = 0;
     for (const stat of feedStats) {
         recordFeedResult(stat.url, !stat.error);
-        // Also record in D1 source_registry
+        if (!stat.error) crawlSuccesses++; else crawlFailures++;
         try {
             await updateSourceStats(env.DB, stat.url, {
                 success: !stat.error,
@@ -114,52 +117,66 @@ async function processFeeds(messages, env) {
     // Intra-batch dedup + D1 insert + JOB_QUEUE dispatch
     const seenHashes = new Set();
     let newlyInsertedCount = 0;
+    let duplicateCount = 0;
+    let queueMsgs = 0;
+    const batchSkillCounts = {};
+    let remoteJobs = 0, hybridJobs = 0, onsiteJobs = 0;
+    let salarySum = 0, salaryCount = 0;
 
     for (const job of jobs) {
-        // Intra-batch dedup by content_hash
         if (job.content_hash && seenHashes.has(job.content_hash)) {
+            duplicateCount++;
             continue;
         }
         if (job.content_hash) seenHashes.add(job.content_hash);
 
-        // D1 dedup + insert
         const { inserted } = await insertJobIfNotExists(env.DB, job);
-        if (!inserted) continue;
+        if (!inserted) { duplicateCount++; continue; }
 
         newlyInsertedCount++;
-
-        // Push to scoring queue
         await env.JOB_QUEUE.send(job);
+        queueMsgs++;
 
-        // Record term frequencies for TF-IDF (v5 intelligence)
+        // Track market signals
         if (job.matchedTerms?.length) {
-            try {
-                await recordTermFrequencies(env.DB, job.matchedTerms);
-            } catch { /* non-critical */ }
+            for (const term of job.matchedTerms) {
+                batchSkillCounts[term] = (batchSkillCounts[term] || 0) + 1;
+            }
+            try { await recordTermFrequencies(env.DB, job.matchedTerms); } catch { }
+        }
+
+        // Remote/location detection
+        const jobText = `${job.title || ''} ${job.contentSnippet || ''}`.toLowerCase();
+        if (/\b(remote|wfh|work from home|distributed|anywhere)\b/.test(jobText)) remoteJobs++;
+        else if (/\bhybrid\b/.test(jobText)) hybridJobs++;
+        else onsiteJobs++;
+
+        // Salary tracking
+        const salaryMatch = jobText.match(/\$([\d,]+)/g);
+        if (salaryMatch) {
+            const val = parseInt(salaryMatch[0].replace(/[$,]/g, ''), 10);
+            if (val > 1000 && val < 1_000_000) { salarySum += val; salaryCount++; }
         }
     }
 
-    // Source Discovery: detect new ATS platforms + domains from job URLs (Layer 3+4)
+    // Source Discovery (Layer 3+4)
+    let newAts = 0, newDomains = 0;
     try {
         const jobUrls = jobs.map(j => j.link).filter(Boolean);
         const knownUrls = new Set(allSources.map(s => s.url));
-        const { sources: newSources, domains: newDomains } = detectAtsSourcesWithDomains(jobUrls, knownUrls);
+        const { sources: newSources, domains: discoveredDomains } = detectAtsSourcesWithDomains(jobUrls, knownUrls);
 
-        // Register discovered ATS sources
         for (const src of newSources) {
             await registerDiscoveredSource(env.DB, src);
         }
-        if (newSources.length > 0) {
-            logger.info(`[Discovery] Auto-registered ${newSources.length} new ATS sources`);
-        }
+        newAts = newSources.length;
+        if (newAts > 0) logger.info(`[Discovery] Auto-registered ${newAts} new ATS sources`);
 
-        // Queue discovered domains for career page probing (Layer 4)
-        for (const { domain, sourceUrl } of newDomains.slice(0, 20)) {
+        for (const { domain, sourceUrl } of discoveredDomains.slice(0, 20)) {
             await registerDomain(env.DB, domain, sourceUrl);
         }
-        if (newDomains.length > 0) {
-            logger.info(`[Discovery] Queued ${Math.min(newDomains.length, 20)} domains for career detection`);
-        }
+        newDomains = Math.min(discoveredDomains.length, 20);
+        if (newDomains > 0) logger.info(`[Discovery] Queued ${newDomains} domains for career detection`);
     } catch (err) {
         logger.warn(`[Discovery] Source detection failed: ${err.message}`);
     }
@@ -167,15 +184,35 @@ async function processFeeds(messages, env) {
     // Record yield for intelligence layer
     for (const fs of feedStats) {
         if (fs.success) {
-            try {
-                await recordSourceYield(env.DB, fs.url, newlyInsertedCount, fs.count || 0);
-            } catch { /* non-critical */ }
+            try { await recordSourceYield(env.DB, fs.url, newlyInsertedCount, fs.count || 0); } catch { }
         }
     }
 
-    logger.info(`[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs.`);
+    // ── Daily Metrics ──────────────────────────────────────────────────────
+    try {
+        await incrementDailyMetrics(env.DB, {
+            sources_scanned: allSources.length,
+            crawl_successes: crawlSuccesses,
+            crawl_failures: crawlFailures,
+            raw_jobs_found: jobs.length,
+            unique_jobs_stored: newlyInsertedCount,
+            duplicates_filtered: duplicateCount,
+            new_sources_ats: newAts,
+            new_domains_queued: newDomains,
+            remote_jobs: remoteJobs,
+            hybrid_jobs: hybridJobs,
+            onsite_jobs: onsiteJobs,
+            salary_sum: salarySum,
+            salary_count: salaryCount,
+            worker_invocations: 1,
+            d1_writes: newlyInsertedCount + newAts,
+            queue_messages: queueMsgs,
+            skill_counts: batchSkillCounts,
+        });
+    } catch { /* non-critical */ }
 
-    // Ack feed messages so they leave the queue
+    logger.info(`[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`);
+
     for (const msg of messages) {
         msg.ack();
     }
@@ -193,6 +230,11 @@ async function evaluateJobs(messages, env) {
     const thresholdContext = await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold);
     const globalThreshold = thresholdContext.effective;
 
+    let aiCallsCount = 0;
+    let alertsQueued = 0;
+    let scoreSum = 0;
+    let scoreMax = 0;
+
     for (const msg of messages) {
         const job = msg.body;
 
@@ -203,6 +245,7 @@ async function evaluateJobs(messages, env) {
 
         const jobTextForAi = `${job.title} ${job.company || ''} ${job.categories?.join(' ') || ''}`;
         const jobVector = await generateEmbedding(env.AI, jobTextForAi);
+        aiCallsCount++;
 
         for (const profile of activeProfiles) {
             if (await hasSentAlert(env.DB, job.id, profile.id)) {
@@ -216,6 +259,7 @@ async function evaluateJobs(messages, env) {
             const profileSpecs = [...(config.searchRules?.mustMatch || []), ...(config.searchRules?.niceToHave || [])].join(' ');
             const profileVector = await generateEmbedding(env.AI, profileSpecs);
             const semanticSim = cosineSimilarity(jobVector, profileVector);
+            aiCallsCount++;
 
             let scoreResult = scoreJob(job, config, idfData, semanticSim);
 
@@ -242,16 +286,32 @@ async function evaluateJobs(messages, env) {
                 });
 
                 await markAlertSent(env.DB, job.id, profile.id);
+                alertsQueued++;
+                scoreSum += scoreResult.score;
+                scoreMax = Math.max(scoreMax, scoreResult.score);
             }
         }
 
         msg.ack();
     }
+
+    // ── Daily Metrics ──────────────────────────────────────────────────────
+    try {
+        await incrementDailyMetrics(env.DB, {
+            ai_calls: aiCallsCount,
+            worker_invocations: 1,
+            queue_messages: alertsQueued,
+            score_sum: scoreSum,
+            score_max: scoreMax,
+        });
+    } catch { /* non-critical */ }
 }
 
 // ── 3. Sender (Consumes ALERT_QUEUE) ──────────────────────────────────────────
 async function sendAlerts(messages, env) {
     const config = loadConfig();
+    let sentCount = 0;
+    let failedCount = 0;
 
     for (const msg of messages) {
         const { profileId, job, scoreResult } = msg.body;
@@ -267,15 +327,27 @@ async function sendAlerts(messages, env) {
             if (stats.sent > 0) {
                 logger.info(`[Sender] Alert successfully delivered to profile ${profileId}`);
                 msg.ack();
+                sentCount++;
             } else {
                 logger.warn(`[Sender] Alert delivery failed for profile ${profileId}`);
                 msg.retry({ delaySeconds: 60 * 15 });
+                failedCount++;
             }
         } catch (err) {
             logger.error(`[Sender] Alert threw error: ${err.message}`);
             msg.retry({ delaySeconds: 60 * 15 });
+            failedCount++;
         }
     }
+
+    // ── Daily Metrics ──────────────────────────────────────────────────────
+    try {
+        await incrementDailyMetrics(env.DB, {
+            alerts_sent: sentCount,
+            alert_failures: failedCount,
+            worker_invocations: 1,
+        });
+    } catch { /* non-critical */ }
 }
 
 // ── Worker Export ─────────────────────────────────────────────────────────────
@@ -304,6 +376,20 @@ export default {
                     timestamp: new Date().toISOString(),
                     ...metrics,
                 });
+            } catch (err) {
+                return jsonResponse({ status: 'error', message: err.message }, 500);
+            }
+        }
+
+        if (url.pathname === '/report') {
+            try {
+                const data = await getDailyReportData(env.DB);
+                const report = formatDailyReport(data);
+                if (request.method === 'POST') {
+                    const result = await sendDailyReport(env.DB, env);
+                    return jsonResponse({ status: 'ok', sent: result.sent, channels: result.channels, report });
+                }
+                return new Response(report, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
             } catch (err) {
                 return jsonResponse({ status: 'error', message: err.message }, 500);
             }
@@ -412,6 +498,23 @@ export default {
         try {
             await cleanupStaleJobs(env.DB, 30);
         } catch { /* non-critical */ }
+
+        // ── Daily Metrics: track cycle ─────────────────────────────────────
+        try {
+            await incrementDailyMetrics(env.DB, { cycles_completed: 1, worker_invocations: 1 });
+        } catch { /* non-critical */ }
+
+        // ── Daily Intelligence Report (trigger at midnight UTC cycle) ──────
+        const hourUTC = new Date().getUTCHours();
+        const minuteUTC = new Date().getUTCMinutes();
+        if (hourUTC === 0 && minuteUTC < 15) {
+            try {
+                const result = await sendDailyReport(env.DB, env);
+                logger.info(`[DailyReport] Sent to: ${result.channels.join(', ') || 'none'}`);
+            } catch (err) {
+                logger.warn(`[DailyReport] Failed: ${err.message}`);
+            }
+        }
 
         logger.info(`[Producer] Cycle #${cycleNumber} dispatch complete.`);
     },

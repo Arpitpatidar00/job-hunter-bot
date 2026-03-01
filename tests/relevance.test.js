@@ -4,7 +4,7 @@
 import { jest } from '@jest/globals';
 
 // Mock the logger to prevent actual file I/O during tests
-jest.unstable_mockModule('../src/logger.js', () => ({
+jest.unstable_mockModule('../src/core/logger.js', () => ({
     default: {
         info: jest.fn(),
         warn: jest.fn(),
@@ -15,12 +15,7 @@ jest.unstable_mockModule('../src/logger.js', () => ({
     },
 }));
 
-// Mock sanitize-html to avoid full dep in tests
-jest.unstable_mockModule('sanitize-html', () => ({
-    default: (html) => (html || '').replace(/<[^>]*>/g, '').trim(),
-}));
-
-const { scoreJob, isJobRelevant, isNewJob, timeAgo } = await import('../src/relevance.js');
+const { scoreJob, isJobRelevant, isNewJob, timeAgo } = await import('../src/scoring/relevance.js');
 
 /** Minimal config for scoring tests. */
 const baseConfig = {

@@ -2,113 +2,87 @@
  * @jest-environment node
  */
 import { jest } from '@jest/globals';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 
-// Mock the logger
-jest.unstable_mockModule('../src/logger.js', () => ({
+jest.unstable_mockModule('../src/core/logger.js', () => ({
     default: {
         info: jest.fn(),
         warn: jest.fn(),
         error: jest.fn(),
         evaluated: jest.fn(),
-        skipped: jest.fn(),
         notified: jest.fn(),
     },
 }));
 
-const { loadSeenJobs, saveSeenJobs, markSeen, hasSeen } = await import('../src/storage.js');
+const { hasSeen, markSeen } = await import('../src/storage/storage.js');
 
-const TMP_DIR = path.join(os.tmpdir(), 'job-hunter-test-' + Date.now());
-const TEST_FILE = path.join(TMP_DIR, 'test_seen.json');
+/**
+ * Simple in-memory KV mock matching Cloudflare KV namespace interface.
+ */
+class MockKV {
+    constructor() { this.store = new Map(); }
+    async get(key) { return this.store.get(key) ?? null; }
+    async put(key, val, _opts) { this.store.set(key, val); }
+    async delete(key) { this.store.delete(key); }
+}
 
-beforeAll(() => {
-    fs.mkdirSync(TMP_DIR, { recursive: true });
-});
-
-afterAll(() => {
-    fs.rmSync(TMP_DIR, { recursive: true, force: true });
-});
-
-afterEach(() => {
-    // Clean up test files
-    for (const f of [TEST_FILE, `${TEST_FILE}.tmp`, `${TEST_FILE}.bak`]) {
-        try { fs.unlinkSync(f); } catch { /* ignore */ }
-    }
-});
-
-describe('loadSeenJobs', () => {
-    test('returns empty Map when file does not exist', () => {
-        const map = loadSeenJobs(path.join(TMP_DIR, 'nonexistent.json'));
-        expect(map).toBeInstanceOf(Map);
-        expect(map.size).toBe(0);
+describe('hasSeen (KV-based)', () => {
+    test('returns { seen: false } for unseen job', async () => {
+        const kv = new MockKV();
+        const result = await hasSeen(kv, 'job-1');
+        expect(result.seen).toBe(false);
     });
 
-    test('loads new Map format (object with timestamps)', () => {
-        const data = { 'job-1': 1700000000000, 'job-2': 1700000100000 };
-        fs.writeFileSync(TEST_FILE, JSON.stringify(data));
-        const map = loadSeenJobs(TEST_FILE);
-        expect(map.size).toBe(2);
-        expect(map.get('job-1')).toBe(1700000000000);
+    test('returns { seen: true, reason: "url" } after markSeen', async () => {
+        const kv = new MockKV();
+        await markSeen(kv, 'job-1', { title: 'React Dev', company: 'Acme' });
+        const result = await hasSeen(kv, 'job-1', { title: 'React Dev', company: 'Acme' });
+        expect(result.seen).toBe(true);
+        expect(result.reason).toBe('url');
     });
 
-    test('migrates legacy array format', () => {
-        const data = ['job-a', 'job-b', 'job-c'];
-        fs.writeFileSync(TEST_FILE, JSON.stringify(data));
-        const map = loadSeenJobs(TEST_FILE);
-        expect(map.size).toBe(3);
-        expect(map.has('job-a')).toBe(true);
-        expect(typeof map.get('job-a')).toBe('number');
+    test('content-hash dedup catches cross-platform duplicates', async () => {
+        const kv = new MockKV();
+        const job1 = { title: 'React Developer', company: 'Acme' };
+        const job2 = { title: 'React Developer', company: 'Acme' };
+
+        await markSeen(kv, 'guid-from-source-a', job1);
+
+        // Same job, different ID (from a different feed)
+        const result = await hasSeen(kv, 'guid-from-source-b', job2);
+        expect(result.seen).toBe(true);
+        expect(result.reason).toBe('content-hash');
     });
 
-    test('returns empty Map for corrupt JSON', () => {
-        fs.writeFileSync(TEST_FILE, '{broken json!!!');
-        const map = loadSeenJobs(TEST_FILE);
-        expect(map.size).toBe(0);
-    });
-});
-
-describe('saveSeenJobs', () => {
-    test('writes Map to file correctly', () => {
-        const map = new Map([['job-x', 123], ['job-y', 456]]);
-        saveSeenJobs(TEST_FILE, map);
-
-        const raw = fs.readFileSync(TEST_FILE, 'utf8');
-        const data = JSON.parse(raw);
-        expect(data['job-x']).toBe(123);
-        expect(data['job-y']).toBe(456);
+    test('different jobs are not falsely detected as duplicates', async () => {
+        const kv = new MockKV();
+        await markSeen(kv, 'job-a', { title: 'React Dev', company: 'Acme' });
+        const result = await hasSeen(kv, 'job-b', { title: 'Node.js Engineer', company: 'Beta Corp' });
+        expect(result.seen).toBe(false);
     });
 
-    test('creates backup file on subsequent saves', () => {
-        const map1 = new Map([['old-job', 100]]);
-        saveSeenJobs(TEST_FILE, map1);
-
-        const map2 = new Map([['old-job', 100], ['new-job', 200]]);
-        saveSeenJobs(TEST_FILE, map2);
-
-        expect(fs.existsSync(`${TEST_FILE}.bak`)).toBe(true);
-        const backupData = JSON.parse(fs.readFileSync(`${TEST_FILE}.bak`, 'utf8'));
-        expect(backupData['old-job']).toBe(100);
-        expect(backupData['new-job']).toBeUndefined();
+    test('handles missing job object gracefully', async () => {
+        const kv = new MockKV();
+        const result = await hasSeen(kv, 'job-1');
+        expect(result.seen).toBe(false);
     });
 });
 
-describe('markSeen / hasSeen', () => {
-    test('marks a job as seen and can query it', () => {
-        const map = new Map();
-        expect(hasSeen(map, 'job-1')).toBe(false);
-        markSeen(map, 'job-1');
-        expect(hasSeen(map, 'job-1')).toBe(true);
+describe('markSeen (KV-based)', () => {
+    test('stores both url key and content-hash key', async () => {
+        const kv = new MockKV();
+        await markSeen(kv, 'job-123', { title: 'Dev', company: 'Co' });
+
+        // URL key should exist
+        expect(await kv.get('seen:job-123')).not.toBeNull();
+
+        // Content-hash key should also exist (starts with 'seen:hash:')
+        const keys = [...kv.store.keys()];
+        const hashKey = keys.find(k => k.startsWith('seen:hash:'));
+        expect(hashKey).toBeDefined();
     });
 
-    test('markSeen stores a timestamp', () => {
-        const map = new Map();
-        const before = Date.now();
-        markSeen(map, 'job-ts');
-        const after = Date.now();
-        const ts = map.get('job-ts');
-        expect(ts).toBeGreaterThanOrEqual(before);
-        expect(ts).toBeLessThanOrEqual(after);
+    test('does not throw on null job object', async () => {
+        const kv = new MockKV();
+        await expect(markSeen(kv, 'job-1')).resolves.not.toThrow();
     });
 });

@@ -3,24 +3,27 @@
  */
 import { jest } from '@jest/globals';
 
-// Mock the logger
-jest.unstable_mockModule('../src/logger.js', () => ({
+jest.unstable_mockModule('../src/core/logger.js', () => ({
     default: {
         info: jest.fn(),
         warn: jest.fn(),
         error: jest.fn(),
         evaluated: jest.fn(),
-        skipped: jest.fn(),
         notified: jest.fn(),
     },
 }));
 
-// Mock sanitize-html
-jest.unstable_mockModule('sanitize-html', () => ({
-    default: (html) => (html || '').replace(/<[^>]*>/g, '').trim(),
-}));
-
-const { retryWithBackoff, parseDate, sanitizeText, parseInterval, escapeRegex } = await import('../src/utils.js');
+const {
+    retryWithBackoff,
+    parseDate,
+    sanitizeText,
+    escapeRegex,
+    compareTwoStrings,
+    pLimit,
+    parseExperienceYears,
+    extractSalaryUSD,
+    detectRemoteType,
+} = await import('../src/core/utils.js');
 
 describe('retryWithBackoff', () => {
     test('succeeds on first attempt', async () => {
@@ -84,35 +87,9 @@ describe('sanitizeText', () => {
         expect(sanitizeText(null)).toBe('');
         expect(sanitizeText(undefined)).toBe('');
     });
-});
 
-describe('parseInterval', () => {
-    test('parses "30m" to 1800000ms', () => {
-        expect(parseInterval('30m')).toBe(30 * 60 * 1000);
-    });
-
-    test('parses "1h" to 3600000ms', () => {
-        expect(parseInterval('1h')).toBe(60 * 60 * 1000);
-    });
-
-    test('parses "2h30m" to combined ms', () => {
-        expect(parseInterval('2h30m')).toBe(2 * 60 * 60 * 1000 + 30 * 60 * 1000);
-    });
-
-    test('parses "15m" correctly', () => {
-        expect(parseInterval('15m')).toBe(15 * 60 * 1000);
-    });
-
-    test('passes through numeric input as-is', () => {
-        expect(parseInterval(5000)).toBe(5000);
-    });
-
-    test('parses plain number string as ms', () => {
-        expect(parseInterval('10000')).toBe(10000);
-    });
-
-    test('throws for invalid format', () => {
-        expect(() => parseInterval('abc')).toThrow();
+    test('decodes HTML entities', () => {
+        expect(sanitizeText('A &amp; B')).toBe('A & B');
     });
 });
 
@@ -126,5 +103,89 @@ describe('escapeRegex', () => {
     test('leaves plain strings unchanged', () => {
         expect(escapeRegex('javascript')).toBe('javascript');
         expect(escapeRegex('react')).toBe('react');
+    });
+});
+
+describe('compareTwoStrings', () => {
+    test('identical strings return 1', () => {
+        expect(compareTwoStrings('react', 'react')).toBe(1);
+    });
+
+    test('different strings return < 1', () => {
+        expect(compareTwoStrings('react', 'angular')).toBeLessThan(1);
+    });
+
+    test('similar strings return high similarity', () => {
+        expect(compareTwoStrings('reactjs', 'react.js')).toBeGreaterThan(0.5);
+    });
+});
+
+describe('pLimit', () => {
+    test('limits concurrent execution', async () => {
+        const limit = pLimit(2);
+        const results = [];
+        const task = (val) => () => new Promise(resolve => {
+            setTimeout(() => {
+                results.push(val);
+                resolve(val);
+            }, 10);
+        });
+
+        const promises = [limit(task(1)), limit(task(2)), limit(task(3))];
+        await Promise.all(promises);
+        expect(results).toHaveLength(3);
+    });
+});
+
+describe('parseExperienceYears', () => {
+    test('parses "2-5 years"', () => {
+        const result = parseExperienceYears('requires 2-5 years of experience');
+        expect(result).toEqual({ min: 2, max: 5 });
+    });
+
+    test('parses "3+ years"', () => {
+        const result = parseExperienceYears('minimum 3+ years');
+        expect(result).toEqual({ min: 3, max: null });
+    });
+
+    test('returns null when no experience found', () => {
+        expect(parseExperienceYears('just a description')).toBeNull();
+    });
+});
+
+describe('extractSalaryUSD', () => {
+    test('parses $80k-$120k', () => {
+        const result = extractSalaryUSD('Salary: $80k-$120k per year');
+        expect(result).not.toBeNull();
+        expect(result.min).toBe(80000);
+        expect(result.max).toBe(120000);
+    });
+
+    test('returns null when no salary present', () => {
+        expect(extractSalaryUSD('No salary info here')).toBeNull();
+    });
+
+    test('parses LPA salary', () => {
+        const result = extractSalaryUSD('salary 15-25 LPA');
+        expect(result).not.toBeNull();
+        expect(result.currency).toBe('INR');
+    });
+});
+
+describe('detectRemoteType', () => {
+    test('detects "fully remote"', () => {
+        expect(detectRemoteType('This is a fully remote position')).toBe('remote');
+    });
+
+    test('detects hybrid', () => {
+        expect(detectRemoteType('hybrid role, 3 days in office')).toBe('hybrid');
+    });
+
+    test('detects onsite', () => {
+        expect(detectRemoteType('This is an on-site position, no remote')).toBe('onsite');
+    });
+
+    test('returns unknown when no signals', () => {
+        expect(detectRemoteType('We are hiring a developer')).toBe('unknown');
     });
 });

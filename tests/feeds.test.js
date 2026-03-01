@@ -4,7 +4,7 @@
 import { jest } from '@jest/globals';
 
 // Mock the logger
-jest.unstable_mockModule('../src/logger.js', () => ({
+jest.unstable_mockModule('../src/core/logger.js', () => ({
     default: {
         info: jest.fn(),
         warn: jest.fn(),
@@ -15,45 +15,39 @@ jest.unstable_mockModule('../src/logger.js', () => ({
     },
 }));
 
-// Mock sanitize-html
-jest.unstable_mockModule('sanitize-html', () => ({
-    default: (html) => (html || '').replace(/<[^>]*>/g, '').trim(),
+// Mock the connector registry so we don't need fetch/HTMLRewriter
+const mockRunAllConnectors = jest.fn();
+jest.unstable_mockModule('../src/connectors/index.js', () => ({
+    runAllConnectors: mockRunAllConnectors,
 }));
 
-// Mock rss-parser
-const mockParseURL = jest.fn();
-jest.unstable_mockModule('rss-parser', () => ({
-    default: class {
-        parseURL = mockParseURL;
-    },
-}));
-
-// Mock p-limit to run sequentially in tests
-jest.unstable_mockModule('p-limit', () => ({
-    default: () => (fn) => fn(),
-}));
-
-const { fetchAllFeeds } = await import('../src/feeds.js');
-
-const baseConfig = {
-    maxConcurrentFeeds: 3,
-    maxRetries: 1,
-};
+const { fetchAllFeeds } = await import('../src/storage/feeds.js');
 
 afterEach(() => {
-    mockParseURL.mockReset();
+    mockRunAllConnectors.mockReset();
 });
 
 describe('fetchAllFeeds', () => {
     test('returns parsed items for successful feeds', async () => {
-        mockParseURL.mockResolvedValue({
-            items: [
-                { title: 'Job 1', link: 'https://example.com/1', pubDate: '2024-01-01', guid: 'g1' },
-                { title: 'Job 2', link: 'https://example.com/2', pubDate: '2024-01-02', guid: 'g2' },
+        mockRunAllConnectors.mockResolvedValue({
+            jobs: [
+                { title: 'Job 1', link: 'https://example.com/1' },
+                { title: 'Job 2', link: 'https://example.com/2' },
             ],
+            feedStats: [{
+                type: 'rss',
+                url: 'https://feed1.com/rss',
+                name: 'feed1.com',
+                count: 2,
+                error: null,
+                items: [
+                    { title: 'Job 1', link: 'https://example.com/1' },
+                    { title: 'Job 2', link: 'https://example.com/2' },
+                ],
+            }],
         });
 
-        const results = await fetchAllFeeds(['https://feed1.com/rss'], baseConfig);
+        const results = await fetchAllFeeds(['https://feed1.com/rss'], {});
         expect(results).toHaveLength(1);
         expect(results[0].items).toHaveLength(2);
         expect(results[0].items[0].title).toBe('Job 1');
@@ -61,51 +55,61 @@ describe('fetchAllFeeds', () => {
     });
 
     test('handles feed fetch errors gracefully', async () => {
-        mockParseURL.mockRejectedValue(new Error('Network timeout'));
+        mockRunAllConnectors.mockResolvedValue({
+            jobs: [],
+            feedStats: [{
+                type: 'rss',
+                url: 'https://bad-feed.com/rss',
+                name: 'bad-feed.com',
+                count: 0,
+                error: 'Network timeout',
+                items: [],
+            }],
+        });
 
-        const results = await fetchAllFeeds(['https://bad-feed.com/rss'], baseConfig);
+        const results = await fetchAllFeeds(['https://bad-feed.com/rss'], {});
         expect(results).toHaveLength(1);
         expect(results[0].items).toHaveLength(0);
         expect(results[0].error).toBe('Network timeout');
     });
 
     test('handles mix of successful and failed feeds', async () => {
-        mockParseURL
-            .mockResolvedValueOnce({
-                items: [{ title: 'Good Job', link: 'https://x.com/1', guid: 'g1' }],
-            })
-            .mockRejectedValueOnce(new Error('Timeout'));
+        mockRunAllConnectors.mockResolvedValue({
+            jobs: [{ title: 'Good Job', link: 'https://x.com/1' }],
+            feedStats: [
+                { type: 'rss', url: 'https://good.com/rss', name: 'good.com', count: 1, error: null, items: [{ title: 'Good Job', link: 'https://x.com/1' }] },
+                { type: 'rss', url: 'https://bad.com/rss', name: 'bad.com', count: 0, error: 'Timeout', items: [] },
+            ],
+        });
 
-        const results = await fetchAllFeeds(
-            ['https://good.com/rss', 'https://bad.com/rss'],
-            baseConfig
-        );
-
+        const results = await fetchAllFeeds(['https://good.com/rss', 'https://bad.com/rss'], {});
         expect(results).toHaveLength(2);
         expect(results[0].items).toHaveLength(1);
         expect(results[1].items).toHaveLength(0);
         expect(results[1].error).toBe('Timeout');
     });
 
-    test('sanitizes HTML from item titles and content', async () => {
-        mockParseURL.mockResolvedValue({
-            items: [
-                {
-                    title: '<b>Bold</b> Title',
-                    content: '<script>alert("xss")</script>Safe content',
-                    link: 'https://x.com/1',
-                    guid: 'g1',
-                },
-            ],
+    test('returns empty results for empty feed URLs array', async () => {
+        mockRunAllConnectors.mockResolvedValue({
+            jobs: [],
+            feedStats: [],
         });
 
-        const results = await fetchAllFeeds(['https://feed.com/rss'], baseConfig);
-        expect(results[0].items[0].title).toBe('Bold Title');
-        expect(results[0].items[0].content).toBe('alert("xss")Safe content');
+        const results = await fetchAllFeeds([], {});
+        expect(results).toHaveLength(0);
     });
 
-    test('returns empty results for empty feed URLs array', async () => {
-        const results = await fetchAllFeeds([], baseConfig);
-        expect(results).toHaveLength(0);
+    test('passes feed URLs to connector via merged config', async () => {
+        mockRunAllConnectors.mockResolvedValue({ jobs: [], feedStats: [] });
+
+        const urls = ['https://a.com/rss', 'https://b.com/rss'];
+        await fetchAllFeeds(urls, { someOption: true });
+
+        expect(mockRunAllConnectors).toHaveBeenCalledWith(
+            expect.objectContaining({
+                feeds: urls,
+                someOption: true,
+            }),
+        );
     });
 });

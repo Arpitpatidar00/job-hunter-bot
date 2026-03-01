@@ -1,0 +1,78 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "job-hunter-bot",
+	"main": "src/worker.js",
+	"compatibility_date": "2025-02-27",
+	"compatibility_flags": [],
+	"workers_dev": true,
+	"build": {
+		"command": "npm run build"
+	},
+	// Cron triggers for 3 staggered batches per cycle
+	// The batcher.js script maps:
+	//   :00/:15/:30/:45 → Batch 0
+	//   :05/:20/:35/:50 → Batch 1
+	//   :10/:25/:40/:55 → Batch 2
+	"triggers": {
+		"crons": [
+			// Scheduled producer cron trigger (fires event to fetch feeds)
+			"0,15,30,45 * * * *"
+		]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "SEEN_JOBS",
+			"id": "9606d0c7fcda4e69bb04cc351bd7fd5a"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "job-hunter-db",
+			"database_id": "5ac7ed56-2edd-42ae-9ec8-28c8d57af629",
+			"migrations_dir": "migrations"
+		}
+	],
+	// Queue Producers (Worker can send messages TO these)
+	"queues": {
+		"producers": [
+			{
+				"queue": "feed-queue",
+				"binding": "FEED_QUEUE"
+			},
+			{
+				"queue": "job-queue",
+				"binding": "JOB_QUEUE"
+			},
+			{
+				"queue": "alert-queue",
+				"binding": "ALERT_QUEUE"
+			}
+		],
+		// Queue Consumers (Worker receives messages FROM these)
+		"consumers": [
+			{
+				"queue": "feed-queue",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 1
+			},
+			{
+				"queue": "job-queue",
+				"max_batch_size": 20,
+				"max_batch_timeout": 5,
+				"max_retries": 3
+			},
+			{
+				"queue": "alert-queue",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 5
+			}
+		]
+	},
+	// Workers AI for Semantic Embeddings (Task 7)
+	"ai": {
+		"binding": "AI"
+	}
+}

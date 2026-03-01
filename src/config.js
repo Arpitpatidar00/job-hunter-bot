@@ -1,157 +1,202 @@
 /**
  * @module config
- * @description Loads configuration from config.json, validates with Joi, and merges CLI overrides via yargs.
- * Supports the full weighted-scoring config schema (searchRules, weights, synonyms, etc.).
+ * @description Bot configuration — hardcoded for Cloudflare Workers (no filesystem access).
+ * Previously loaded from config.json + CLI args; now exported as a frozen object.
  */
 
-import fs from 'fs';
-import path from 'path';
-import Joi from 'joi';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
-import { parseInterval } from './utils.js';
-
 /**
- * Joi schema for validating the merged configuration.
- */
-const configSchema = Joi.object({
-    feeds: Joi.array().items(Joi.string().uri()).min(1).required(),
-
-    // ── Scoring search rules ────────────────────────────────────────────
-    searchRules: Joi.object({
-        mustMatch: Joi.array().items(Joi.string()).default([]),
-        shouldMatch: Joi.array().items(Joi.string()).default([]),
-        niceToHave: Joi.array().items(Joi.string()).default([]),
-        exclude: Joi.array().items(Joi.string()).default([]),
-    }).default({ mustMatch: [], shouldMatch: [], niceToHave: [], exclude: [] }),
-
-    targetRoles: Joi.array().items(Joi.string()).default([]),
-    experienceLevel: Joi.array().items(Joi.string()).default([]),
-
-    synonyms: Joi.object().pattern(Joi.string(), Joi.array().items(Joi.string())).default({}),
-
-    // ── Weighted scoring ────────────────────────────────────────────────
-    weights: Joi.object({
-        titleMatch: Joi.number().min(0).max(100).default(30),
-        skillsMatch: Joi.number().min(0).max(100).default(30),
-        techStackMatch: Joi.number().min(0).max(100).default(20),
-        locationMatch: Joi.number().min(0).max(100).default(10),
-        salaryMatch: Joi.number().min(0).max(100).default(10),
-    }).default(),
-
-    scoringBonuses: Joi.object({
-        nextjsAndTypescript: Joi.number().default(8),
-        nodeAndMongodb: Joi.number().default(6),
-        awsPresent: Joi.number().default(4),
-        fullMernStack: Joi.number().default(10),
-        remoteIndia: Joi.number().default(5),
-    }).default(),
-
-    scoringPenalties: Joi.object({
-        nonJsStack: Joi.number().max(0).default(-15),
-        frontendOnlyNoBackend: Joi.number().max(0).default(-5),
-        differentPrimaryLanguage: Joi.number().max(0).default(-10),
-    }).default(),
-
-    notificationThreshold: Joi.number().integer().min(0).max(100).default(65),
-
-    // ── Filters ─────────────────────────────────────────────────────────
-    filters: Joi.object({
-        workPreference: Joi.array().items(Joi.string()).default(['remote']),
-        locations: Joi.array().items(Joi.string()).default([]),
-        minSalaryUSD: Joi.number().min(0).default(0),
-        minPrimaryMatches: Joi.number().integer().min(0).default(3),
-    }).default(),
-
-    locationKeywords: Joi.array().items(Joi.string()).min(1).default(['remote']),
-    regexKeywords: Joi.array().items(Joi.string()).default([]),
-
-    // ── Operational ─────────────────────────────────────────────────────
-    pollIntervalMs: Joi.number().integer().positive().min(10000).required(),
-    timeWindowHours: Joi.number().positive().required(),
-    fuzzyThreshold: Joi.number().min(0).max(1).required(),
-    maxConcurrentFeeds: Joi.number().integer().positive().max(20).required(),
-    maxRetries: Joi.number().integer().positive().max(10).required(),
-    seenJobsFile: Joi.string().required(),
-    dryRun: Joi.boolean().default(false),
-}).options({ stripUnknown: true });
-
-/**
- * Parse CLI arguments using yargs.
- * @returns {object} Parsed CLI arguments.
- */
-function parseCLI() {
-    return yargs(hideBin(process.argv))
-        .usage('Usage: node index.js [options]')
-        .option('interval', {
-            alias: 'i',
-            type: 'string',
-            description: 'Poll interval (e.g. "30m", "1h")',
-        })
-        .option('keywords', {
-            alias: 'k',
-            type: 'string',
-            description: 'Comma-separated profile keywords override',
-        })
-        .option('dry-run', {
-            alias: 'd',
-            type: 'boolean',
-            description: 'Log alerts without actually sending them',
-            default: false,
-        })
-        .option('config', {
-            alias: 'c',
-            type: 'string',
-            description: 'Path to a custom config.json file',
-            default: 'config.json',
-        })
-        .help()
-        .alias('help', 'h')
-        .version(false)
-        .parseSync();
-}
-
-/**
- * Load, merge, and validate configuration.
- * Priority: CLI args > config.json > defaults.
+ * Bot configuration (v3.1) — Cloudflare Workers.
+ * Secrets (webhook URLs, tokens) come from the `env` binding at runtime.
  * @returns {Readonly<object>} Frozen, validated config object.
  */
 export function loadConfig() {
-    const cli = parseCLI();
+    return Object.freeze({
+        version: '3.1.0',
+        feeds: [
+            "https://jobscollider.com/remote-jobs.rss",
+            "https://hireweb3.io/job/rss",
+            "https://empllo.com/feeds/remote-engineering-jobs.rss",
+            "https://empllo.com/feeds/remote-devops-jobs.rss",
+            "https://www.smartremotejobs.com/feed/all.rss",
+            "https://www.smartremotejobs.com/feed/software-development-remote-jobs.rss",
+            "https://weworkremotely.com/remote-jobs.rss",
+            "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+            "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss",
+            "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+            "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
+            "https://weworkremotely.com/categories/remote-front-end-programming-jobs.rss",
+            "https://remoteok.com/remote-dev-jobs.rss",
+            "https://himalayas.app/jobs/rss",
+            "https://4dayweek.io/rss",
+            "https://app.vuejobs.com/feed/posts",
+            "https://dribbble.com/jobs.rss",
+            "https://hasjob.co/feed",
+            "https://remoteok.io/remote-jobs.rss",
+            "https://www.fossjobs.net/rss/all/",
+            "https://cryptojobslist.com/jobs.rss",
+            "https://cryptocurrencyjobs.co/index.xml",
+            "https://jobspresso.co/feed/?post_type=job_listing",
+            "https://remoteworkhub.com/feed/?post_type=job",
+            "https://landing.jobs/feed?remote=true",
+        ],
 
-    // Load config file
-    const configPath = path.resolve(cli.config);
-    let fileConfig = {};
-    try {
-        const raw = fs.readFileSync(configPath, 'utf8');
-        fileConfig = JSON.parse(raw);
-    } catch (err) {
-        if (cli.config !== 'config.json') {
-            // User explicitly specified a config file that doesn't exist
-            throw new Error(`Failed to load config file "${configPath}": ${err.message}`);
-        }
-        // Default config.json missing — proceed with defaults
-        console.warn(`Warning: config.json not found, using defaults.`);
-    }
+        // ── Multi-source ATS platforms (Phase 2) ─────────────────────────────
+        sources: [
+            // Greenhouse boards (public JSON API)
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs', name: 'HashiCorp', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/discord/jobs', name: 'Discord', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/figma/jobs', name: 'Figma', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/cloudflare/jobs', name: 'Cloudflare', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/netlify/jobs', name: 'Netlify', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/vercel/jobs', name: 'Vercel', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/supabase/jobs', name: 'Supabase', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/linear/jobs', name: 'Linear', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/notion/jobs', name: 'Notion', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/datadog/jobs', name: 'Datadog', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/daboraio/jobs', name: 'dbt Labs', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/grafanalabs/jobs', name: 'Grafana Labs', enabled: true },
 
-    // Merge CLI overrides
-    const merged = { ...fileConfig };
+            // Lever postings (public JSON API)
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/stripe', name: 'Stripe', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/twitch', name: 'Twitch', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/netlify', name: 'Netlify (Lever)', enabled: true },
 
-    if (cli.interval) {
-        merged.pollIntervalMs = parseInterval(cli.interval);
-    }
+            // Ashby (public posting API)
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/notion', name: 'Notion (Ashby)', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/linear', name: 'Linear (Ashby)', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/ramp', name: 'Ramp', enabled: true },
 
-    if (cli.keywords) {
-        merged.profileKeywords = cli.keywords.split(',').map((k) => k.trim().toLowerCase());
-    }
+            // Workable (public jobs API)
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/pricehubble/jobs', name: 'PriceHubble', enabled: true },
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/toggl/jobs', name: 'Toggl', enabled: true },
+        ],
 
-    merged.dryRun = cli.dryRun || cli['dry-run'] || false;
+        searchRules: {
+            mustMatch: ["javascript", "typescript", "react", "next.js", "node.js"],
+            shouldMatch: [
+                "mongodb", "postgresql", "express", "graphql", "rest api",
+                "aws", "docker", "tailwindcss", "prisma", "nestjs",
+            ],
+            niceToHave: [
+                "redis", "ci/cd", "microservices", "system design", "nx monorepo",
+                "kubernetes", "terraform", "github actions", "jest", "cypress",
+            ],
+            exclude: [
+                "wordpress", "php", "laravel", "drupal", "dotnet", ".net", "c#",
+                "swift developer", "android native", "kotlin developer", "flutter",
+                "java developer", "spring boot", "ruby on rails", "django", "unpaid internship",
+            ],
+        },
 
-    // Validate
-    const { error, value } = configSchema.validate(merged);
-    if (error) {
-        throw new Error(`Config validation error: ${error.details.map((d) => d.message).join(', ')}`);
-    }
+        targetRoles: [
+            "full stack developer", "full stack engineer", "fullstack developer", "fullstack engineer",
+            "mern stack developer", "mern stack engineer", "next.js developer", "next.js engineer",
+            "frontend engineer", "frontend developer", "frontend react developer",
+            "backend engineer", "backend developer", "backend engineer node.js",
+            "software engineer", "software developer", "web developer", "web engineer",
+            "javascript developer", "javascript engineer", "typescript developer",
+            "react developer", "react engineer", "node.js developer", "node.js engineer",
+        ],
 
-    return Object.freeze(value);
+        experienceLevel: [
+            "entry level", "junior", "associate", "mid-level", "mid",
+            "sde 1", "sde 2", "1+ years", "2+ years", "3+ years", "4+ years",
+        ],
+
+        synonyms: {
+            "react": ["reactjs", "react.js"],
+            "next.js": ["nextjs", "next js", "next.js"],
+            "node.js": ["nodejs", "node js", "node.js"],
+            "typescript": ["ts", "typescript"],
+            "javascript": ["js", "ecmascript", "es6", "es2015"],
+            "mongodb": ["mongo", "mongoose"],
+            "postgresql": ["postgres", "psql"],
+            "express": ["expressjs", "express.js"],
+            "graphql": ["graph ql"],
+            "aws": ["amazon web services"],
+            "docker": ["containerization"],
+            "tailwindcss": ["tailwind", "tailwind css"],
+            "nestjs": ["nest.js", "nest js"],
+        },
+
+        weights: {
+            titleMatch: 30,
+            skillsMatch: 30,
+            techStackMatch: 20,
+            locationMatch: 10,
+            salaryMatch: 10,
+        },
+
+        scoringBonuses: {
+            nextjsAndTypescript: 8,
+            nodeAndMongodb: 6,
+            awsPresent: 4,
+            fullMernStack: 10,
+            remoteIndia: 5,
+        },
+
+        scoringPenalties: {
+            nonJsStack: -15,
+            frontendOnlyNoBackend: -5,
+            differentPrimaryLanguage: -10,
+        },
+
+        /** Scoring engine v2 tuning parameters */
+        scoring: {
+            /** TF-IDF keyword-density blending weight (0–1). */
+            tfidfWeight: 0.15,
+            /** Points added when detected seniority aligns with user's experienceLevel. */
+            experienceBonus: 5,
+            /** Points deducted when detected seniority is HIGHER than user's experienceLevel. */
+            seniorityPenalty: -8,
+        },
+
+        notificationThreshold: 50,
+
+        filters: {
+            workPreference: ["remote", "remote-first", "distributed", "work from home", "wfh", "anywhere"],
+            locations: ["india", "europe", "worldwide", "global", "anywhere"],
+            minSalaryUSD: 25000,
+            minPrimaryMatches: 1,
+        },
+
+        locationKeywords: ["remote", "remote-first", "distributed", "work from home", "wfh", "anywhere"],
+        regexKeywords: [],
+
+        pollIntervalMs: 900000,
+        timeWindowHours: 24,
+        fuzzyThreshold: 0.82,
+        maxConcurrentFeeds: 7,
+        maxRetries: 3,
+
+        // ── Self-Expanding Engine Configuration ────────────────────────────────
+        searchExpansion: {
+            enabled: true,
+            queries: [
+                'remote next.js developer jobs',
+                'node.js backend engineer remote',
+                'typescript fullstack developer remote',
+                'react developer remote worldwide',
+                'javascript engineer remote india',
+                'mern stack developer remote jobs',
+                'full stack developer remote hiring',
+            ],
+            maxSearchesPerCycle: 3,
+            maxDomainsPerSearch: 10,
+        },
+
+        crawlIntelligence: {
+            enabled: true,
+            /** Run priority recalculation every N cron cycles */
+            recalcIntervalCycles: 4,
+            /** Run search expansion every N cron cycles */
+            searchIntervalCycles: 24,
+            /** Run career page probing every N cron cycles */
+            careerProbeIntervalCycles: 12,
+            /** Max domains to probe per career detection cycle */
+            maxCareerProbes: 5,
+        },
+
+        dryRun: false,
+    });
 }

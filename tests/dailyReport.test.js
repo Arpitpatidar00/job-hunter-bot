@@ -119,14 +119,14 @@ describe('Daily Intelligence Report', () => {
         expect(report).toContain('New Sources: +0');
         expect(report).toContain('Sources Scanned: 0');
         expect(report).toContain('Alerts Sent: 0');
-        expect(report).toContain('Unhealthy');
+        expect(report).toContain('No Data');
     });
 
     test('formatDailyReport shows quality index based on avg score', () => {
         // Excellent quality (avg 80)
         const dataExcellent = {
             date: '2026-03-01',
-            today: { alerts_sent: 10, score_sum: 800, score_max: 95 },
+            today: { alerts_sent: 10, score_sum: 800, score_max: 95, unique_jobs_stored: 100 },
             prev: {}, tiers: {}, sources: { total: 10, active: 10, disabled: 0 },
         };
         expect(formatDailyReport(dataExcellent)).toContain('Excellent');
@@ -168,5 +168,60 @@ describe('Daily Intelligence Report', () => {
             prev: {}, tiers: {}, sources: { total: 10, active: 10, disabled: 0 },
         };
         expect(formatDailyReport(dataHigh)).toContain('🔴');
+    });
+
+    test('formatDailyReport does not crash when all metric fields are undefined', () => {
+        // Simulates the exact false-zeros scenario: daily_metrics row has no data
+        const data = {
+            date: '2026-03-03',
+            today: {
+                // Only cycles_completed and worker_invocations set (as in the original issue)
+                cycles_completed: 2,
+                worker_invocations: 2,
+            },
+            prev: {},
+            tiers: {},
+            sources: { total: 45, active: 45, disabled: 0 },
+        };
+
+        // Should not throw — this was crashing when .toLocaleString() was called on undefined
+        const report = formatDailyReport(data);
+
+        expect(report).toContain('JOB HUNTER BOT — DAILY INTELLIGENCE');
+        expect(report).toContain('Sources Scanned: 0');
+        expect(report).toContain('Alerts Sent: 0');
+        expect(report).toContain('Cycles Today: 2');
+        expect(report).toContain('Worker Invocations: 2');
+        // Ensure no 'undefined' or 'NaN' leaked into the report
+        expect(report).not.toContain('undefined');
+        expect(report).not.toContain('NaN');
+    });
+
+    test('formatDailyReport renders backfilled data correctly', () => {
+        // Simulates ground-truth backfill: unique_jobs_stored and sources_scanned
+        // filled from actual tables when daily_metrics showed zeros
+        const data = {
+            date: '2026-03-03',
+            today: {
+                worker_invocations: 2,
+                cycles_completed: 2,
+                unique_jobs_stored: 1889, // backfilled
+                raw_jobs_found: 1889,     // backfilled
+                sources_scanned: 45,      // backfilled
+                crawl_successes: 45,      // backfilled
+                _backfilled: true,
+            },
+            prev: { unique_jobs_stored: 1200 },
+            tiers: {},
+            sources: { total: 45, active: 45, disabled: 0 },
+        };
+
+        const report = formatDailyReport(data);
+
+        expect(report).toContain('Unique Stored: 1889');
+        expect(report).toContain('Sources Scanned: 45');
+        expect(report).toContain('Raw Jobs: 1889');
+        expect(report).toContain('Active & Collecting');
+        expect(report).not.toContain('undefined');
     });
 });

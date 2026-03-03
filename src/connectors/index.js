@@ -87,6 +87,8 @@ export async function runAllConnectors(config) {
                     url: result.feedUrl,
                     name: result.sourceName,
                     count: result.items.length,
+                    durationMs: result.durationMs || 0,
+                    success: !result.error,
                     error: result.error || null,
                 });
 
@@ -106,6 +108,8 @@ export async function runAllConnectors(config) {
                 url: `connector:${type}`,
                 name: type,
                 count: 0,
+                durationMs: 0,
+                success: false,
                 error: err.message,
             });
         }

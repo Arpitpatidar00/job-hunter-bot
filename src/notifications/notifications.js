@@ -150,7 +150,7 @@ function buildDiscordEmbed(job, scoreResult) {
         description: description || undefined,
         color: DISCORD_COLORS[color] || 0x5865f2,
         fields,
-        footer: { text: 'Job Hunter Bot v3.1' },
+        footer: { text: 'Job Hunter Bot v5.1' },
         timestamp: new Date().toISOString(),
     };
 }

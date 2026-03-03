@@ -45,88 +45,81 @@ function extractAllTags(xml, tag) {
 }
 
 /**
- * Parse RSS 2.0 or Atom XML into raw feed item objects using Cloudflare's HTMLRewriter.
- * This provides streaming parsing, preventing memory exhaustion on huge XML payloads.
+ * Parse RSS 2.0 or Atom XML into raw feed item objects using regex-based parsing.
+ * Works reliably across all Cloudflare Workers environments.
+ * Handles CDATA, plain text, Atom link attributes, and mixed content.
  * 
  * @param {Response} response - The active fetch Response object.
  * @param {string} feedUrl - Source feed URL (for logging).
  * @returns {Promise<object[]>} Array of raw item objects.
  */
 async function parseXml(response, feedUrl) {
+    const xml = await response.text();
     const items = [];
-    let currentItem = null;
-    let currentTag = null;
-    let textBuffer = '';
 
-    // We sniff the first few bytes lightly to detect atom vs rss, but HTMLRewriter Handles both gracefully 
-    // if we just listen to <entry> and <item>.
+    // Match both RSS <item>...</item> and Atom <entry>...</entry>
+    const itemRegex = /<(item|entry)[\s>]([\s\S]*?)<\/\1>/gi;
+    let itemMatch;
 
-    const rewriter = new HTMLRewriter()
-        .on('item, entry', {
-            element(el) {
-                currentItem = { categories: [], link: '' };
-            }
-        })
-        .on('item > *, entry > *', {
-            element(el) {
-                currentTag = el.tagName.toLowerCase();
-                textBuffer = '';
+    while ((itemMatch = itemRegex.exec(xml)) !== null) {
+        const block = itemMatch[2];
+        const currentItem = { categories: [], link: '' };
 
-                // Atom links use attributes: <link href="...">
-                if (currentTag === 'link' && currentItem) {
-                    const href = el.getAttribute('href');
-                    if (href) currentItem.link = href;
-                }
-            },
-            text(chunk) {
-                if (currentItem && currentTag) {
-                    textBuffer += chunk.text;
-                }
-            }
-        })
-        .on('item > *, entry > *', {
-            // Fired when the closing tag is reached
-            element(el) {
-                if (!currentItem || !currentTag) return;
+        // Title
+        const title = extractTag(block, 'title');
+        if (title) currentItem.title = sanitizeText(title);
 
-                const content = textBuffer.trim();
+        // Link — RSS uses <link>text</link>, Atom uses <link href="..."/>
+        const linkText = extractTag(block, 'link');
+        if (linkText) {
+            currentItem.link = linkText;
+        }
+        // Also check for Atom-style <link href="...">
+        const atomLinkMatch = block.match(/<link[^>]+href\s*=\s*["']([^"']+)["'][^>]*\/?>/i);
+        if (atomLinkMatch && !currentItem.link) {
+            currentItem.link = atomLinkMatch[1];
+        }
 
-                // Map XML tags to our schema
-                if (currentTag === 'title') currentItem.title = sanitizeText(content);
-                else if (currentTag === 'link' && !currentItem.link) currentItem.link = content;
-                else if (currentTag === 'guid' || currentTag === 'id') currentItem.guid = content;
-                else if (currentTag === 'pubdate' || currentTag === 'published' || currentTag === 'updated' || currentTag === 'dc:date') {
-                    currentItem.pubDate = content;
-                    currentItem.isoDate = content;
-                }
-                else if (currentTag === 'description' || currentTag === 'summary' || currentTag === 'content:encoded' || currentTag === 'content') {
-                    // Accumulate content if multiple fields exist
-                    currentItem.content = sanitizeText((currentItem.content || '') + ' ' + content);
-                }
-                else if (currentTag === 'author' || currentTag === 'dc:creator') currentItem.creator = sanitizeText(content);
-                else if (currentTag === 'category') currentItem.categories.push(content);
+        // GUID / ID
+        const guid = extractTag(block, 'guid') || extractTag(block, 'id');
+        if (guid) currentItem.guid = guid;
 
-                currentTag = null;
-                textBuffer = '';
-            }
-        })
-        .on('item, entry', {
-            element(el) {
-                if (currentItem) {
-                    // Fallback link to guid if missing
-                    if (!currentItem.link && currentItem.guid && currentItem.guid.startsWith('http')) {
-                        currentItem.link = currentItem.guid;
-                    }
-                    if (!currentItem.guid) currentItem.guid = currentItem.link;
-                    items.push(currentItem);
-                    currentItem = null;
-                }
-            }
-        });
+        // Date (try multiple tags)
+        const pubDate = extractTag(block, 'pubDate') || extractTag(block, 'published') ||
+            extractTag(block, 'updated') || extractTag(block, 'dc:date');
+        if (pubDate) {
+            currentItem.pubDate = pubDate;
+            currentItem.isoDate = pubDate;
+        }
 
-    // We pass a cloned response through the rewriter and exhaust the stream
-    const resStream = rewriter.transform(response);
-    await resStream.arrayBuffer(); // This forces the stream chunks through the rewriter hooks
+        // Content / Description (accumulate from multiple fields)
+        const description = extractTag(block, 'description');
+        const summary = extractTag(block, 'summary');
+        const contentEncoded = extractTag(block, 'content:encoded');
+        const contentTag = extractTag(block, 'content');
+        const contentText = [description, summary, contentEncoded, contentTag]
+            .filter(Boolean)
+            .join(' ');
+        if (contentText) currentItem.content = sanitizeText(contentText);
+
+        // Author
+        const author = extractTag(block, 'author') || extractTag(block, 'dc:creator');
+        if (author) currentItem.creator = sanitizeText(author);
+
+        // Categories
+        const cats = extractAllTags(block, 'category');
+        for (const cat of cats) {
+            if (cat) currentItem.categories.push(cat);
+        }
+
+        // Fallback: use guid as link if link is missing
+        if (!currentItem.link && currentItem.guid && currentItem.guid.startsWith('http')) {
+            currentItem.link = currentItem.guid;
+        }
+        if (!currentItem.guid) currentItem.guid = currentItem.link;
+
+        items.push(currentItem);
+    }
 
     return items;
 }

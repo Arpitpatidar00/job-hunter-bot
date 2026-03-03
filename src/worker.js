@@ -27,7 +27,7 @@ import {
 } from './db/index.js';
 
 // Source discovery + Self-expanding engine
-import { detectAtsSources, detectAtsSourcesWithDomains } from './discovery/sourceDiscovery.js';
+import { detectAtsSourcesWithDomains } from './discovery/sourceDiscovery.js';
 import { registerDomain, getPendingDomains, probeDomainsForCareers } from './discovery/careerDetector.js';
 import { runSearchExpansion } from './discovery/searchExpander.js';
 import {
@@ -58,11 +58,11 @@ function jsonResponse(data, status = 200) {
 async function queueHandler(batch, env) {
     const queueName = batch.queue;
 
-    if (queueName.endsWith('-feed-queue')) {
+    if (queueName === 'feed-queue' || queueName.endsWith('-feed-queue')) {
         await processFeeds(batch.messages, env);
-    } else if (queueName.endsWith('-job-queue')) {
+    } else if (queueName === 'job-queue' || queueName.endsWith('-job-queue')) {
         await evaluateJobs(batch.messages, env);
-    } else if (queueName.endsWith('-alert-queue')) {
+    } else if (queueName === 'alert-queue' || queueName.endsWith('-alert-queue')) {
         await sendAlerts(batch.messages, env);
     } else {
         logger.error(`[Queue] Unknown queue: ${queueName}`);
@@ -91,11 +91,16 @@ async function processFeeds(messages, env) {
     };
 
     // Check circuit breakers and filter healthy sources
-    batchConfig.feeds = batchConfig.feeds.filter(url => {
-        const isOpen = isFeedCircuitOpen(url);
-        if (isOpen) logger.warn(`[Circuit] Skipping ${url} — circuit is OPEN`);
-        return !isOpen;
-    });
+    const healthyFeeds = [];
+    for (const url of batchConfig.feeds) {
+        const isOpen = await isFeedCircuitOpen(env.SEEN_JOBS, url);
+        if (isOpen) {
+            logger.warn(`[Circuit] Skipping ${url} — circuit is OPEN`);
+        } else {
+            healthyFeeds.push(url);
+        }
+    }
+    batchConfig.feeds = healthyFeeds;
 
     // Run all connectors in parallel
     const { jobs, feedStats, totalItems, totalErrors } = await runAllConnectors(batchConfig);
@@ -104,14 +109,20 @@ async function processFeeds(messages, env) {
     let crawlSuccesses = 0;
     let crawlFailures = 0;
     for (const stat of feedStats) {
-        recordFeedResult(stat.url, !stat.error);
+        try {
+            await recordFeedResult(env.SEEN_JOBS, stat.url, {
+                success: !stat.error,
+                latencyMs: stat.durationMs || 0,
+                error: stat.error || '',
+            });
+        } catch (err) { logger.warn(`[Fetcher] recordFeedResult failed: ${err.message}`); }
         if (!stat.error) crawlSuccesses++; else crawlFailures++;
         try {
             await updateSourceStats(env.DB, stat.url, {
                 success: !stat.error,
                 jobCount: stat.count || 0,
             });
-        } catch { /* non-critical */ }
+        } catch (err) { logger.warn(`[Fetcher] updateSourceStats failed: ${err.message}`); }
     }
 
     // Intra-batch dedup + D1 insert + JOB_QUEUE dispatch
@@ -122,6 +133,8 @@ async function processFeeds(messages, env) {
     const batchSkillCounts = {};
     let remoteJobs = 0, hybridJobs = 0, onsiteJobs = 0;
     let salarySum = 0, salaryCount = 0;
+    const perSourceNewJobs = new Map(); // Track per-source new job counts for yield recording
+    const jobsToQueue = []; // Collect jobs for batch send to JOB_QUEUE
 
     for (const job of jobs) {
         if (job.content_hash && seenHashes.has(job.content_hash)) {
@@ -134,15 +147,18 @@ async function processFeeds(messages, env) {
         if (!inserted) { duplicateCount++; continue; }
 
         newlyInsertedCount++;
-        await env.JOB_QUEUE.send(job);
-        queueMsgs++;
+        // Track per-source yield
+        const jobSourceUrl = job.sourceUrl || '';
+        perSourceNewJobs.set(jobSourceUrl, (perSourceNewJobs.get(jobSourceUrl) || 0) + 1);
+
+        jobsToQueue.push(job);
 
         // Track market signals
         if (job.matchedTerms?.length) {
             for (const term of job.matchedTerms) {
                 batchSkillCounts[term] = (batchSkillCounts[term] || 0) + 1;
             }
-            try { await recordTermFrequencies(env.DB, job.matchedTerms); } catch { }
+            try { await recordTermFrequencies(env.DB, job.matchedTerms); } catch (err) { logger.warn(`[Fetcher] recordTermFrequencies failed: ${err.message}`); }
         }
 
         // Remote/location detection
@@ -156,6 +172,57 @@ async function processFeeds(messages, env) {
         if (salaryMatch) {
             const val = parseInt(salaryMatch[0].replace(/[$,]/g, ''), 10);
             if (val > 1000 && val < 1_000_000) { salarySum += val; salaryCount++; }
+        }
+    }
+
+    // Batch send to JOB_QUEUE: pack jobs into chunks (max ~50 per message to stay under 128KB)
+    // This reduces queue operations from hundreds to a handful per cycle.
+    const JOB_CHUNK_SIZE = 50;
+    let jobQueueSuccess = false;
+    try {
+        for (let i = 0; i < jobsToQueue.length; i += JOB_CHUNK_SIZE) {
+            await env.JOB_QUEUE.send({ jobs: jobsToQueue.slice(i, i + JOB_CHUNK_SIZE) });
+        }
+        queueMsgs = Math.ceil(jobsToQueue.length / JOB_CHUNK_SIZE);
+        logger.info(`[Fetcher] Sent ${jobsToQueue.length} jobs in ${queueMsgs} queue messages`);
+        jobQueueSuccess = true;
+    } catch (err) {
+        logger.error(`[Fetcher] JOB_QUEUE send failed: ${err.message}. Falling back to direct evaluation.`);
+    }
+
+    // ── Daily Metrics (Phase 1: Core crawl + job metrics) ──────────────────
+    // Write metrics IMMEDIATELY after job processing, BEFORE evaluateJobs fallback.
+    // This ensures metrics are recorded even if the Worker is killed during evaluation.
+    try {
+        await incrementDailyMetrics(env.DB, {
+            sources_scanned: allSources.length,
+            crawl_successes: crawlSuccesses,
+            crawl_failures: crawlFailures,
+            raw_jobs_found: jobs.length,
+            unique_jobs_stored: newlyInsertedCount,
+            duplicates_filtered: duplicateCount,
+            remote_jobs: remoteJobs,
+            hybrid_jobs: hybridJobs,
+            onsite_jobs: onsiteJobs,
+            salary_sum: salarySum,
+            salary_count: salaryCount,
+            worker_invocations: 1,
+            d1_writes: newlyInsertedCount,
+            queue_messages: queueMsgs,
+            skill_counts: batchSkillCounts,
+        });
+    } catch (err) {
+        logger.error(`[Fetcher] Daily metrics (phase 1) failed: ${err.message}`);
+    }
+
+    // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
+    if (!jobQueueSuccess && jobsToQueue.length > 0) {
+        try {
+            const fakeMessages = [{ body: { jobs: jobsToQueue }, ack() { }, retry() { } }];
+            await evaluateJobs(fakeMessages, env);
+            logger.info(`[Fetcher] Direct evaluation completed for ${jobsToQueue.length} jobs`);
+        } catch (evalErr) {
+            logger.error(`[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`);
         }
     }
 
@@ -183,33 +250,24 @@ async function processFeeds(messages, env) {
 
     // Record yield for intelligence layer
     for (const fs of feedStats) {
-        if (fs.success) {
-            try { await recordSourceYield(env.DB, fs.url, newlyInsertedCount, fs.count || 0); } catch { }
+        if (!fs.error) {
+            const sourceNewJobs = perSourceNewJobs.get(fs.url) || 0;
+            try { await recordSourceYield(env.DB, fs.url, sourceNewJobs, fs.count || 0); } catch (err) { logger.warn(`[Fetcher] recordSourceYield failed: ${err.message}`); }
         }
     }
 
-    // ── Daily Metrics ──────────────────────────────────────────────────────
-    try {
-        await incrementDailyMetrics(env.DB, {
-            sources_scanned: allSources.length,
-            crawl_successes: crawlSuccesses,
-            crawl_failures: crawlFailures,
-            raw_jobs_found: jobs.length,
-            unique_jobs_stored: newlyInsertedCount,
-            duplicates_filtered: duplicateCount,
-            new_sources_ats: newAts,
-            new_domains_queued: newDomains,
-            remote_jobs: remoteJobs,
-            hybrid_jobs: hybridJobs,
-            onsite_jobs: onsiteJobs,
-            salary_sum: salarySum,
-            salary_count: salaryCount,
-            worker_invocations: 1,
-            d1_writes: newlyInsertedCount + newAts,
-            queue_messages: queueMsgs,
-            skill_counts: batchSkillCounts,
-        });
-    } catch { /* non-critical */ }
+    // ── Daily Metrics (Phase 2: Discovery metrics) ─────────────────────────
+    if (newAts > 0 || newDomains > 0) {
+        try {
+            await incrementDailyMetrics(env.DB, {
+                new_sources_ats: newAts,
+                new_domains_queued: newDomains,
+                d1_writes: newAts,
+            });
+        } catch (err) {
+            logger.error(`[Fetcher] Daily metrics (phase 2) failed: ${err.message}`);
+        }
+    }
 
     logger.info(`[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`);
 
@@ -230,70 +288,92 @@ async function evaluateJobs(messages, env) {
     const thresholdContext = await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold);
     const globalThreshold = thresholdContext.effective;
 
-    let aiCallsCount = 0;
+    // Pre-compute profile embedding ONCE (same config for all jobs/profiles)
+    const profileSpecs = [...(config.searchRules?.mustMatch || []), ...(config.searchRules?.niceToHave || [])].join(' ');
+    const profileVector = await generateEmbedding(env.AI, profileSpecs);
+    let aiCallsCount = 1; // Count the profile embedding call
     let alertsQueued = 0;
     let scoreSum = 0;
     let scoreMax = 0;
 
     for (const msg of messages) {
-        const job = msg.body;
+        // Support both batched format { jobs: [...] } and legacy single job format
+        const msgJobs = msg.body.jobs || [msg.body];
 
-        if (!isNewJob(job, config.timeWindowHours)) {
-            msg.ack();
-            continue;
-        }
-
-        const jobTextForAi = `${job.title} ${job.company || ''} ${job.categories?.join(' ') || ''}`;
-        const jobVector = await generateEmbedding(env.AI, jobTextForAi);
-        aiCallsCount++;
-
-        for (const profile of activeProfiles) {
-            if (await hasSentAlert(env.DB, job.id, profile.id)) {
+        for (const job of msgJobs) {
+            if (!isNewJob(job, config.timeWindowHours)) {
                 continue;
             }
 
-            const tempResult = scoreJob(job, config, { totalDocs: 1, termCounts: {} });
-            const localTerms = tempResult.matchedSkills || [];
-            const idfData = await getGlobalTermFrequencies(env.DB, localTerms);
-
-            const profileSpecs = [...(config.searchRules?.mustMatch || []), ...(config.searchRules?.niceToHave || [])].join(' ');
-            const profileVector = await generateEmbedding(env.AI, profileSpecs);
-            const semanticSim = cosineSimilarity(jobVector, profileVector);
+            const jobTextForAi = `${job.title} ${job.company || ''} ${job.categories?.join(' ') || ''}`;
+            const jobVector = await generateEmbedding(env.AI, jobTextForAi);
             aiCallsCount++;
 
-            let scoreResult = scoreJob(job, config, idfData, semanticSim);
+            for (const profile of activeProfiles) {
+                if (await hasSentAlert(env.DB, job.id, profile.id)) {
+                    continue;
+                }
 
-            if (scoreResult.excluded) continue;
+                const tempResult = scoreJob(job, config, { totalDocs: 1, termCounts: {} });
+                const localTerms = tempResult.matchedSkills || [];
+                const idfData = await getGlobalTermFrequencies(env.DB, localTerms);
 
-            const { adjustedScore, feedbackDelta } = applyFeedbackBoost(scoreResult, prefWeights);
-            if (feedbackDelta !== 0) {
-                scoreResult.score = adjustedScore;
-                if (!scoreResult.breakdown) scoreResult.breakdown = {};
-                scoreResult.breakdown.feedbackBoost = feedbackDelta;
-            }
+                const semanticSim = cosineSimilarity(jobVector, profileVector);
 
-            await recordJobScore(env.SEEN_JOBS, scoreResult.score);
+                let scoreResult = scoreJob(job, config, idfData, semanticSim);
 
-            const threshold = profile.notification_threshold || globalThreshold;
+                if (scoreResult.excluded) continue;
 
-            if (scoreResult.score >= threshold) {
-                logger.info(`🚨 [Evaluator] Match for profile ${profile.id}: [${scoreResult.score}] ${job.title}`);
+                const { adjustedScore, feedbackDelta } = applyFeedbackBoost(scoreResult, prefWeights);
+                if (feedbackDelta !== 0) {
+                    scoreResult.score = adjustedScore;
+                    if (!scoreResult.breakdown) scoreResult.breakdown = {};
+                    scoreResult.breakdown.feedbackBoost = feedbackDelta;
+                }
 
-                await env.ALERT_QUEUE.send({
-                    profileId: profile.id,
-                    job: job,
-                    scoreResult: scoreResult
-                });
+                await recordJobScore(env.SEEN_JOBS, scoreResult.score);
 
-                await markAlertSent(env.DB, job.id, profile.id);
-                alertsQueued++;
-                scoreSum += scoreResult.score;
-                scoreMax = Math.max(scoreMax, scoreResult.score);
+                const threshold = profile.notification_threshold || globalThreshold;
+
+                if (scoreResult.score >= threshold) {
+                    logger.info(`🚨 [Evaluator] Match for profile ${profile.id}: [${scoreResult.score}] ${job.title}`);
+
+                    try {
+                        await env.ALERT_QUEUE.send({
+                            profileId: profile.id,
+                            job: job,
+                            scoreResult: scoreResult
+                        });
+                    } catch (queueErr) {
+                        // DIRECT FALLBACK: Send alert inline when ALERT_QUEUE is rate-limited
+                        logger.warn(`[Evaluator] ALERT_QUEUE failed, sending alert directly: ${queueErr.message}`);
+                        try {
+                            await sendAlert(job, scoreResult, {
+                                dryRun: config.dryRun,
+                                config,
+                                env,
+                                attempt: 1
+                            });
+                        } catch (alertErr) {
+                            logger.error(`[Evaluator] Direct alert also failed: ${alertErr.message}`);
+                        }
+                    }
+
+                    await markAlertSent(env.DB, job.id, profile.id);
+                    alertsQueued++;
+                    scoreSum += scoreResult.score;
+                    scoreMax = Math.max(scoreMax, scoreResult.score);
+                }
             }
         }
 
         msg.ack();
     }
+
+    // ── Auto-adjust threshold for next run based on this run's match count ──
+    try {
+        await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold, { matchedLastRun: alertsQueued });
+    } catch (err) { logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`); }
 
     // ── Daily Metrics ──────────────────────────────────────────────────────
     try {
@@ -304,7 +384,9 @@ async function evaluateJobs(messages, env) {
             score_sum: scoreSum,
             score_max: scoreMax,
         });
-    } catch { /* non-critical */ }
+    } catch (err) {
+        logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
+    }
 }
 
 // ── 3. Sender (Consumes ALERT_QUEUE) ──────────────────────────────────────────
@@ -347,7 +429,9 @@ async function sendAlerts(messages, env) {
             alert_failures: failedCount,
             worker_invocations: 1,
         });
-    } catch { /* non-critical */ }
+    } catch (err) {
+        logger.error(`[Sender] Daily metrics update failed: ${err.message}`);
+    }
 }
 
 // ── Worker Export ─────────────────────────────────────────────────────────────
@@ -383,10 +467,12 @@ export default {
 
         if (url.pathname === '/report') {
             try {
-                const data = await getDailyReportData(env.DB);
+                // Support ?date=YYYY-MM-DD to view any day's report (default: today)
+                const reportDate = url.searchParams.get('date') || undefined;
+                const data = await getDailyReportData(env.DB, { reportDate });
                 const report = formatDailyReport(data);
                 if (request.method === 'POST') {
-                    const result = await sendDailyReport(env.DB, env);
+                    const result = await sendDailyReport(env.DB, env, { reportDate });
                     return jsonResponse({ status: 'ok', sent: result.sent, channels: result.channels, report });
                 }
                 return new Response(report, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -396,14 +482,50 @@ export default {
         }
 
         if (url.pathname === '/trigger' && request.method === 'POST') {
-            const config = loadConfig();
-            let count = 0;
-            const allSources = buildSourceList(config);
-            for (const source of allSources) {
-                await env.FEED_QUEUE.send(source);
-                count++;
+            try {
+                const config = loadConfig();
+                const allSources = buildSourceList(config);
+
+                // Try queue-based dispatch first
+                let sent = 0;
+                let queueFailed = false;
+                try {
+                    const batchMessages = allSources.map(s => ({ body: s }));
+                    for (let i = 0; i < batchMessages.length; i += 100) {
+                        await env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100));
+                    }
+                    sent = allSources.length;
+                } catch (err) {
+                    logger.warn(`[Trigger] Queue send failed: ${err.message}. Using direct processing.`);
+                    queueFailed = true;
+                }
+
+                // DIRECT FALLBACK: Process feeds inline when queues are rate-limited
+                // Process 5 sources per batch with a 25-second wall-time guard
+                if (queueFailed) {
+                    const startTime = Date.now();
+                    const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
+                    const DIRECT_BATCH_SIZE = 5;
+                    const fakeMessages = allSources.map(s => ({ body: s, ack() { }, retry() { } }));
+                    for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
+                        if (Date.now() - startTime > WALL_TIME_LIMIT_MS) {
+                            logger.warn(`[Trigger] Wall-time guard: processed ${sent}/${allSources.length} sources in ${((Date.now() - startTime) / 1000).toFixed(1)}s, deferring rest.`);
+                            break;
+                        }
+                        try {
+                            await processFeeds(fakeMessages.slice(i, i + DIRECT_BATCH_SIZE), env);
+                            sent += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
+                        } catch (err) {
+                            logger.error(`[Trigger] Direct batch ${Math.floor(i / DIRECT_BATCH_SIZE)} failed: ${err.message}`);
+                        }
+                    }
+                    return jsonResponse({ status: 'ok', mode: 'direct', msg: `Processed ${sent}/${allSources.length} sources directly (queues rate-limited). Remaining will be picked up by next cron.` });
+                }
+
+                return jsonResponse({ status: 'ok', msg: `Triggered ${sent}/${allSources.length} source messages to queue.` });
+            } catch (err) {
+                return jsonResponse({ status: 'error', message: err.message }, 500);
             }
-            return jsonResponse({ status: 'ok', msg: `Triggered ${count} source messages to queue.` });
         }
 
         return jsonResponse({ status: 'ok', version: '5.1.0' });
@@ -426,7 +548,7 @@ export default {
         let registrySources = [];
         try {
             registrySources = await getEnabledSources(env.DB);
-        } catch { /* D1 not ready yet */ }
+        } catch (err) { logger.warn(`[Producer] D1 registry query failed: ${err.message}`); }
 
         const configUrls = new Set(configSources.map(s => s.url));
         const additionalSources = registrySources.filter(s => !configUrls.has(s.url));
@@ -452,8 +574,42 @@ export default {
 
         logger.info(`[Producer] Broadcasting ${sourcesToCrawl.length} sources to FEED_QUEUE...`);
 
-        for (const source of sourcesToCrawl) {
-            await env.FEED_QUEUE.send(source);
+        // Use batch send to avoid queue rate limiting
+        let queueSuccess = false;
+        try {
+            const batchMessages = sourcesToCrawl.map(s => ({ body: s }));
+            // sendBatch supports up to 100 messages per call
+            for (let i = 0; i < batchMessages.length; i += 100) {
+                await env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100));
+            }
+            logger.info(`[Producer] Successfully queued ${sourcesToCrawl.length} sources`);
+            queueSuccess = true;
+        } catch (err) {
+            logger.error(`[Producer] Queue send failed: ${err.message}. Falling back to DIRECT processing.`);
+        }
+
+        // ── DIRECT FALLBACK: Process feeds inline when queues are rate-limited ──
+        // Use a wall-time guard to stop before the Worker timeout (30s for cron on free tier)
+        if (!queueSuccess) {
+            const directStart = Date.now();
+            const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
+            const DIRECT_BATCH_SIZE = 5; // Smaller batches for faster turnaround
+            let directProcessed = 0;
+            logger.info(`[Producer] Direct mode: processing ${sourcesToCrawl.length} sources inline...`);
+            const fakeMessages = sourcesToCrawl.map(s => ({ body: s, ack() { }, retry() { } }));
+            for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
+                if (Date.now() - directStart > WALL_TIME_LIMIT_MS) {
+                    logger.warn(`[Producer] Wall-time guard: processed ${directProcessed}/${sourcesToCrawl.length} sources in ${((Date.now() - directStart) / 1000).toFixed(1)}s, deferring rest to next cycle.`);
+                    break;
+                }
+                try {
+                    await processFeeds(fakeMessages.slice(i, i + DIRECT_BATCH_SIZE), env);
+                    directProcessed += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
+                } catch (err) {
+                    logger.error(`[Producer] Direct batch ${Math.floor(i / DIRECT_BATCH_SIZE)} failed: ${err.message}`);
+                }
+            }
+            logger.info(`[Producer] Direct processing: ${directProcessed}/${sourcesToCrawl.length} sources completed.`);
         }
 
         // ── 3. Periodic intelligence tasks ────────────────────────────────────
@@ -473,6 +629,9 @@ export default {
                 if (domains.length > 0) {
                     const registered = await probeDomainsForCareers(env.DB, domains, intel.maxCareerProbes || 5);
                     logger.info(`[CareerDetector] Probed ${domains.length} domains, registered ${registered.length} career pages`);
+                    if (registered.length > 0) {
+                        await incrementDailyMetrics(env.DB, { new_sources_career: registered.length });
+                    }
                 }
             } catch (err) {
                 logger.warn(`[CareerDetector] Career probing failed: ${err.message}`);
@@ -490,6 +649,9 @@ export default {
                     config.searchExpansion.maxDomainsPerSearch || 10
                 );
                 logger.info(`[SearchExpander] Expansion: ${newAtsSources} ATS sources, ${newDomains} domains queued`);
+                if (newAtsSources > 0 || newDomains > 0) {
+                    await incrementDailyMetrics(env.DB, { new_sources_search: newAtsSources, new_domains_queued: newDomains });
+                }
             } catch (err) {
                 logger.warn(`[SearchExpander] Search expansion failed: ${err.message}`);
             }
@@ -497,19 +659,21 @@ export default {
 
         try {
             await cleanupStaleJobs(env.DB, 30);
-        } catch { /* non-critical */ }
+        } catch (err) { logger.warn(`[Producer] Cleanup failed: ${err.message}`); }
 
         // ── Daily Metrics: track cycle ─────────────────────────────────────
         try {
             await incrementDailyMetrics(env.DB, { cycles_completed: 1, worker_invocations: 1 });
-        } catch { /* non-critical */ }
+        } catch (err) { logger.error(`[Producer] Daily metrics update failed: ${err.message}`); }
 
         // ── Daily Intelligence Report (trigger at midnight UTC cycle) ──────
         const hourUTC = new Date().getUTCHours();
         const minuteUTC = new Date().getUTCMinutes();
         if (hourUTC === 0 && minuteUTC < 15) {
             try {
-                const result = await sendDailyReport(env.DB, env);
+                // At midnight UTC, report on the PREVIOUS day's complete data
+                const yesterday = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
+                const result = await sendDailyReport(env.DB, env, { reportDate: yesterday });
                 logger.info(`[DailyReport] Sent to: ${result.channels.join(', ') || 'none'}`);
             } catch (err) {
                 logger.warn(`[DailyReport] Failed: ${err.message}`);
@@ -520,6 +684,6 @@ export default {
     },
 
     async queue(batch, env, ctx) {
-        ctx.waitUntil(queueHandler(batch, env));
+        await queueHandler(batch, env);
     }
 };

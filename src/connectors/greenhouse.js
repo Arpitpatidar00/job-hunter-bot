@@ -75,7 +75,7 @@ function normalizeGreenhouseJob(ghJob, source) {
     return normalizeJob({
         id: `gh-${ghJob.id}`,
         title: ghJob.title || '',
-        content: ghJob.content || '',
+        content: sanitizeText(ghJob.content || ''),
         link: ghJob.absolute_url || '',
         pubDate: ghJob.updated_at || '',
         isoDate: ghJob.updated_at || '',

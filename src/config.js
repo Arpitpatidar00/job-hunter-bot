@@ -5,13 +5,13 @@
  */
 
 /**
- * Bot configuration (v3.1) — Cloudflare Workers.
+ * Bot configuration (v3.2) — Cloudflare Workers.
  * Secrets (webhook URLs, tokens) come from the `env` binding at runtime.
  * @returns {Readonly<object>} Frozen, validated config object.
  */
 export function loadConfig() {
     return Object.freeze({
-        version: '3.1.0',
+        version: '3.2.0',
         feeds: [
             "https://jobscollider.com/remote-jobs.rss",
             "https://hireweb3.io/job/rss",
@@ -40,9 +40,9 @@ export function loadConfig() {
             "https://landing.jobs/feed?remote=true",
         ],
 
-        // ── Multi-source ATS platforms (Phase 2) ─────────────────────────────
+        // ── Multi-source ATS platforms ────────────────────────────────────────
         sources: [
-            // Greenhouse boards (public JSON API)
+            // ── Greenhouse (public JSON API) ──────────────────────────────────
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs', name: 'HashiCorp', enabled: true },
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/discord/jobs', name: 'Discord', enabled: true },
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/figma/jobs', name: 'Figma', enabled: true },
@@ -55,20 +55,68 @@ export function loadConfig() {
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/datadog/jobs', name: 'Datadog', enabled: true },
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/daboraio/jobs', name: 'dbt Labs', enabled: true },
             { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/grafanalabs/jobs', name: 'Grafana Labs', enabled: true },
+            // New Greenhouse companies (remote-friendly tech)
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/brex/jobs', name: 'Brex', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/plaid/jobs', name: 'Plaid', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/retool/jobs', name: 'Retool', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/scale/jobs', name: 'Scale AI', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/census/jobs', name: 'Census', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/dbtlabs/jobs', name: 'dbt Labs v2', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/vercel/jobs', name: 'Vercel v2', enabled: false }, // already above, skip
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/loom/jobs', name: 'Loom', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/segment/jobs', name: 'Segment', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/mixpanel/jobs', name: 'Mixpanel', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/amplitude/jobs', name: 'Amplitude', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/postman/jobs', name: 'Postman', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/mongodb/jobs', name: 'MongoDB', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/cockroachlabs/jobs', name: 'CockroachDB', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/prismatic/jobs', name: 'Prismatic', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/render/jobs', name: 'Render', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/railway/jobs', name: 'Railway', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/hasura/jobs', name: 'Hasura', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/neon/jobs', name: 'Neon DB', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/planetscale/jobs', name: 'PlanetScale', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/convex/jobs', name: 'Convex', enabled: true },
+            { type: 'greenhouse', url: 'https://boards-api.greenhouse.io/v1/boards/upstash/jobs', name: 'Upstash', enabled: true },
 
-            // Lever postings (public JSON API)
+            // ── Lever (public JSON API) ──────────────────────────────────────
             { type: 'lever', url: 'https://api.lever.co/v0/postings/stripe', name: 'Stripe', enabled: true },
             { type: 'lever', url: 'https://api.lever.co/v0/postings/twitch', name: 'Twitch', enabled: true },
             { type: 'lever', url: 'https://api.lever.co/v0/postings/netlify', name: 'Netlify (Lever)', enabled: true },
+            // New Lever companies
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/remote', name: 'Remote.com', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/deel', name: 'Deel', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/mercury', name: 'Mercury', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/gusto', name: 'Gusto', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/webflow', name: 'Webflow', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/vercel', name: 'Vercel (Lever)', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/lottiefiles', name: 'LottieFiles', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/ditto', name: 'Ditto', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/stytch', name: 'Stytch', enabled: true },
+            { type: 'lever', url: 'https://api.lever.co/v0/postings/mintlify', name: 'Mintlify', enabled: true },
 
-            // Ashby (public posting API)
+            // ── Ashby (public posting API — no key needed for public boards) ──
             { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/notion', name: 'Notion (Ashby)', enabled: true },
             { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/linear', name: 'Linear (Ashby)', enabled: true },
             { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/ramp', name: 'Ramp', enabled: true },
+            // New Ashby companies
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/liveblocks', name: 'Liveblocks', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/resend', name: 'Resend', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/val-town', name: 'Val Town', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/trigger', name: 'Trigger.dev', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/inngest', name: 'Inngest', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/raycast', name: 'Raycast', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/fey', name: 'Fey', enabled: true },
+            { type: 'ashby', url: 'https://api.ashbyhq.com/posting-api/job-board/sequence', name: 'Sequence', enabled: true },
 
-            // Workable (public jobs API)
+            // ── Workable (public jobs API) ────────────────────────────────────
             { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/pricehubble/jobs', name: 'PriceHubble', enabled: true },
             { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/toggl/jobs', name: 'Toggl', enabled: true },
+            // New Workable companies
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/superside/jobs', name: 'Superside', enabled: true },
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/coda/jobs', name: 'Coda', enabled: true },
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/lemon-io/jobs', name: 'Lemon.io', enabled: true },
+            { type: 'workable', url: 'https://apply.workable.com/api/v3/accounts/whereby/jobs', name: 'Whereby', enabled: true },
         ],
 
         searchRules: {
@@ -120,6 +168,9 @@ export function loadConfig() {
             "redis": ["redis cache", "elasticache"],
             "prisma": ["prisma orm"],
             "rest api": ["restful", "rest", "restful api"],
+            // MERN synonym group — fixes 0% relevance for fullstack roles
+            "mern": ["mern stack", "mean stack", "fullstack js", "full stack js", "full-stack javascript"],
+            "fullstack": ["full stack", "full-stack", "fullstack developer", "full stack developer"],
         },
 
         weights: {
@@ -176,25 +227,26 @@ export function loadConfig() {
         searchExpansion: {
             enabled: true,
             queries: [
-                // Core role queries
-                'remote next.js developer jobs',
-                'node.js backend engineer remote',
-                'typescript fullstack developer remote',
-                'react developer remote worldwide',
-                'javascript engineer remote india',
-                'mern stack developer remote jobs',
-                'full stack developer remote hiring',
-                // Company-focused discovery
-                'startup hiring remote javascript engineer',
-                'series A startup remote developer openings',
-                'Y Combinator company hiring engineers remote',
-                // Technology-niche queries
-                'graphql api developer remote',
-                'serverless node.js engineer jobs',
-                'headless cms developer remote react',
-                // Regional diversity
-                'remote developer jobs europe node.js',
-                'software engineer remote APAC typescript',
+                // --- ATS board discovery (directly targets Greenhouse/Lever/Ashby URLs) ---
+                // These surface actual ATS board URLs that sourceDiscovery.js can pattern-match
+                'site:boards.greenhouse.io javascript developer remote',
+                'site:boards.greenhouse.io react engineer remote hiring',
+                'site:boards.greenhouse.io typescript fullstack remote',
+                'site:jobs.lever.co javascript engineer remote',
+                'site:jobs.lever.co node.js backend remote',
+                'site:jobs.ashbyhq.com react developer remote',
+                'site:jobs.ashbyhq.com fullstack javascript',
+                'site:apply.workable.com remote javascript developer',
+
+                // --- Company career page discovery ---
+                // Surfaces company-owned career pages for careerDetector.js
+                'remote javascript developer careers site:greenhouse.io OR site:lever.co',
+                '"we are hiring" remote react developer site:.co OR site:.io',
+                'remote next.js developer "apply now" startup',
+                'series A startup hiring remote fullstack javascript engineer 2025',
+                'Y Combinator company hiring remote node.js engineer',
+                'remote-first company javascript typescript engineer openings',
+                '"join our team" remote react node developer',
             ],
             maxSearchesPerCycle: 5,
             maxDomainsPerSearch: 15,
@@ -204,12 +256,12 @@ export function loadConfig() {
             enabled: true,
             /** Run priority recalculation every N cron cycles */
             recalcIntervalCycles: 4,
-            /** Run search expansion every N cron cycles (was 24, now ~2 hours) */
-            searchIntervalCycles: 8,
-            /** Run career page probing every N cron cycles (was 12, now ~1.5 hours) */
-            careerProbeIntervalCycles: 6,
-            /** Max domains to probe per career detection cycle */
-            maxCareerProbes: 10,
+            /** Run search expansion every N cron cycles — every ~1 hour (was 8 = ~2 hours) */
+            searchIntervalCycles: 4,
+            /** Run career page probing every N cron cycles — every ~1 hour (was 6 = ~1.5 hours) */
+            careerProbeIntervalCycles: 4,
+            /** Max domains to probe per career detection cycle (was 10) */
+            maxCareerProbes: 20,
         },
 
         dryRun: false,

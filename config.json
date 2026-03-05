@@ -24,7 +24,12 @@
         "https://cryptocurrencyjobs.co/index.xml",
         "https://jobspresso.co/feed/?post_type=job_listing",
         "https://remoteworkhub.com/feed/?post_type=job",
-        "https://landing.jobs/feed?remote=true"
+        "https://landing.jobs/feed?remote=true",
+        "https://wellfound.com/jobs.rss",
+        "https://ai-jobs.net/feed/",
+        "https://startup.jobs/remote.rss",
+        "https://www.workatastartup.com/jobs.rss",
+        "https://nodesk.co/remote-work/software-development/rss.xml"
     ],
     "searchRules": {
         "mustMatch": [

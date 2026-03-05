@@ -106,12 +106,18 @@ export function normalizeJob(raw, sourceMeta = {}) {
     const guid = raw.guid || raw.id || link || '';
     const dedupeStr = jobDedupeKey(title, company);
     const urlPath = link.replace(/\?.*$/, '').replace(/#.*$/, ''); // strip query/fragment
-    const content_hash = fnvHash(dedupeStr + '::' + urlPath);
+
+    // Tight hash: includes URL + content snippet → catches same-source re-posts
+    const content_hash = fnvHash(dedupeStr + '::' + urlPath + '::' + content.slice(0, 500));
+
+    // Loose hash: company + title only → catches cross-source duplicates
+    const similarity_hash = fnvHash(dedupeStr);
 
     return {
         id: guid,
         url: link,
         content_hash,
+        similarity_hash,
         title,
         company,
         link,

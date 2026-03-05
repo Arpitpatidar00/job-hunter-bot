@@ -8,7 +8,8 @@
  *   2. Career page detection → queue for probing
  *
  * This module uses DuckDuckGo's HTML search (no API key needed).
- * Rate-limited to stay within free-tier bounds.
+ * Rate-limited to prevent hammering: max queries per cycle + exponential
+ * backoff on failures + KV-based global cooldown after repeated DDG errors.
  */
 
 import { fetchWithTimeout } from '../connectors/base.js';
@@ -16,6 +17,18 @@ import { detectAtsSources } from './sourceDiscovery.js';
 import { registerDomain } from './careerDetector.js';
 import { registerDiscoveredSource } from '../db/index.js';
 import logger from '../core/logger.js';
+
+/** KV key for tracking consecutive DDG search failures. */
+const DDG_FAILURE_KEY = 'search_expander:ddg_failures';
+
+/** KV key for the global DDG cooldown flag. */
+const DDG_COOLDOWN_KEY = 'search_expander:ddg_cooldown';
+
+/** Consecutive DDG failures before entering cooldown. */
+const DDG_FAILURE_THRESHOLD = 3;
+
+/** Base cooldown in seconds (30 minutes), doubles per threshold breach. */
+const DDG_BASE_COOLDOWN_SECONDS = 30 * 60;
 
 /**
  * Run search-based expansion for a list of queries.
@@ -27,17 +40,54 @@ import logger from '../core/logger.js';
  * @param {number} [maxDomainsPerSearch=10] - Max domains to extract per search.
  * @returns {Promise<{ newAtsSources: number, newDomains: number }>}
  */
-export async function runSearchExpansion(db, queries, knownSourceUrls, maxSearches = 3, maxDomainsPerSearch = 10) {
+/**
+ * Run search-based expansion for a list of queries.
+ *
+ * @param {D1Database} db
+ * @param {string[]} queries - Search queries to run.
+ * @param {Set<string>} knownSourceUrls - Already registered source URLs.
+ * @param {KVNamespace} [kv] - Optional KV for rate-limit state tracking.
+ * @param {number} [maxSearches=3] - Max queries per cycle (hard cap).
+ * @param {number} [maxDomainsPerSearch=10] - Max domains to extract per search.
+ * @returns {Promise<{ newAtsSources: number, newDomains: number }>}
+ */
+export async function runSearchExpansion(db, queries, knownSourceUrls, kv = null, maxSearches = 3, maxDomainsPerSearch = 10) {
     let totalNewAts = 0;
     let totalNewDomains = 0;
 
-    // Pick a random subset of queries each cycle to spread coverage
+    // ── Global DDG cooldown check ────────────────────────────────────────────
+    if (kv) {
+        try {
+            const onCooldown = await kv.get(DDG_COOLDOWN_KEY);
+            if (onCooldown) {
+                logger.info('[SearchExpander] Skipping — DDG global cooldown active.');
+                return { newAtsSources: 0, newDomains: 0 };
+            }
+        } catch { /* KV read failure is non-fatal */ }
+    }
+
+    // ── Query selection: random subset capped at maxSearches ─────────────────
     const shuffled = [...queries].sort(() => Math.random() - 0.5);
     const selected = shuffled.slice(0, maxSearches);
+
+    let consecutiveDdgFailures = 0;
+    if (kv) {
+        try {
+            const raw = await kv.get(DDG_FAILURE_KEY);
+            consecutiveDdgFailures = parseInt(raw || '0', 10);
+        } catch { /* non-fatal */ }
+    }
 
     for (const query of selected) {
         try {
             const urls = await searchDuckDuckGo(query);
+
+            // Reset failure counter on success
+            consecutiveDdgFailures = 0;
+            if (kv) {
+                try { await kv.put(DDG_FAILURE_KEY, '0'); } catch { /* non-fatal */ }
+            }
+
             if (!urls.length) continue;
 
             // 1. Check for ATS patterns in search results
@@ -59,10 +109,28 @@ export async function runSearchExpansion(db, queries, knownSourceUrls, maxSearch
 
         } catch (err) {
             logger.warn(`[SearchExpander] Failed query "${query}": ${err.message}`);
+            consecutiveDdgFailures++;
+
+            if (kv) {
+                try {
+                    await kv.put(DDG_FAILURE_KEY, String(consecutiveDdgFailures));
+
+                    // Enter global cooldown if threshold breached
+                    if (consecutiveDdgFailures >= DDG_FAILURE_THRESHOLD) {
+                        // Exponential backoff: 30min * 2^(failures-threshold)
+                        const factor = Math.pow(2, consecutiveDdgFailures - DDG_FAILURE_THRESHOLD);
+                        const cooldownSecs = Math.min(DDG_BASE_COOLDOWN_SECONDS * factor, 6 * 60 * 60); // cap 6h
+                        await kv.put(DDG_COOLDOWN_KEY, '1', { expirationTtl: cooldownSecs });
+                        logger.warn(`[SearchExpander] DDG cooldown activated: ${Math.round(cooldownSecs / 60)}min`);
+                        break; // Stop further queries this cycle
+                    }
+                } catch { /* non-fatal */ }
+            }
         }
 
-        // Rate limit between searches
-        await sleep(2000);
+        // Exponential backoff between searches: 2s base, doubles per failure
+        const backoffMs = 2000 * Math.pow(2, Math.min(consecutiveDdgFailures, 3));
+        await sleep(backoffMs);
     }
 
     if (totalNewAts > 0 || totalNewDomains > 0) {

@@ -181,3 +181,46 @@ export function applyFeedbackBoost(scoreResult, weights) {
     const adjustedScore = Math.max(0, Math.min(100, scoreResult.score + delta));
     return { adjustedScore, feedbackDelta: delta };
 }
+
+// ── Source-Level Feedback Adjustments ─────────────────────────────────────────
+
+/**
+ * Priority delta table: maps downstream job outcome → source priority change.
+ * @type {Record<string, number>}
+ */
+const SOURCE_FEEDBACK_DELTAS = {
+    interview:  +5,   // Job from this source led to an interview — boost source
+    applied:    +2,   // Applied to this job — mild positive signal
+    saved:      +1,   // Saved but not applied — minor positive
+    clicked:     0,   // Click only — no priority change
+    ignored:    -1,   // Saw but ignored — mild negative
+    rejected:   -3,   // Applied & rejected — soft deprioritize
+};
+
+/**
+ * Apply a downstream job outcome to the originating source's priority score.
+ * Clamps the resulting score to [0, 100]. Uses db.batch() for efficiency.
+ *
+ * @param {D1Database} db
+ * @param {string} sourceUrl - The `sourceUrl` field of the job.
+ * @param {'interview'|'applied'|'saved'|'clicked'|'ignored'|'rejected'} feedbackType
+ * @returns {Promise<{ ok: boolean, delta: number }>}
+ */
+export async function applyFeedbackToSource(db, sourceUrl, feedbackType) {
+    const delta = SOURCE_FEEDBACK_DELTAS[feedbackType];
+    if (delta === undefined || delta === 0) return { ok: true, delta: 0 };
+
+    try {
+        await db.prepare(
+            `UPDATE source_registry
+             SET priority_score = MAX(0, MIN(100, priority_score + ?))
+             WHERE url = ?`
+        ).bind(delta, sourceUrl).run();
+
+        logger.info(`[Feedback] Source ${sourceUrl} priority ${delta > 0 ? '+' : ''}${delta} from "${feedbackType}"`);
+        return { ok: true, delta };
+    } catch (err) {
+        logger.warn(`[Feedback] applyFeedbackToSource failed for ${sourceUrl}: ${err.message}`);
+        return { ok: false, delta };
+    }
+}

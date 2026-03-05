@@ -244,11 +244,24 @@ async function processFeeds(messages, env) {
     }
 
     // Source Discovery (Layer 3+4)
+    // Feed job.link URLs into ATS pattern detection AND company_url / employer_website
+    // fields so we can discover ATS boards from company-owned URLs, not just job-board links.
     let newAts = 0, newDomains = 0;
     try {
-        const jobUrls = jobs.map(j => j.link).filter(Boolean);
+        // Build a rich URL set: include all available URL fields from each job
+        const urlsForAtsDetection = [];
+        for (const job of jobs) {
+            if (job.link) urlsForAtsDetection.push(job.link);
+            if (job.company_url) urlsForAtsDetection.push(job.company_url);
+            if (job.apply_url) urlsForAtsDetection.push(job.apply_url);
+            if (job.ats_source_url) urlsForAtsDetection.push(job.ats_source_url);
+        }
+
         const knownUrls = new Set(allSources.map(s => s.url));
-        const { sources: newSources, domains: discoveredDomains } = detectAtsSourcesWithDomains(jobUrls, knownUrls);
+        const { sources: newSources, domains: discoveredDomains } = detectAtsSourcesWithDomains(
+            urlsForAtsDetection,
+            knownUrls
+        );
 
         for (const src of newSources) {
             await registerDiscoveredSource(env.DB, src);
@@ -256,11 +269,19 @@ async function processFeeds(messages, env) {
         newAts = newSources.length;
         if (newAts > 0) logger.info(`[Discovery] Auto-registered ${newAts} new ATS sources`);
 
-        for (const { domain, sourceUrl } of discoveredDomains.slice(0, 20)) {
+        // Register company domains for career page probing.
+        // Prioritise domains from company_url/apply_url (more likely to be company-owned)
+        // over generic job-board links. Limit to 30 per batch to control D1 writes.
+        const companyDomains = discoveredDomains.filter(d => {
+            // Prefer domains from non-link fields (already pre-filtered by detectAtsSourcesWithDomains)
+            return d.domain && !d.domain.includes('lever.co') && !d.domain.includes('greenhouse.io');
+        }).slice(0, 30);
+
+        for (const { domain, sourceUrl } of companyDomains) {
             await registerDomain(env.DB, domain, sourceUrl);
         }
-        newDomains = Math.min(discoveredDomains.length, 20);
-        if (newDomains > 0) logger.info(`[Discovery] Queued ${newDomains} domains for career detection`);
+        newDomains = companyDomains.length;
+        if (newDomains > 0) logger.info(`[Discovery] Queued ${newDomains} company domains for career probing`);
     } catch (err) {
         logger.warn(`[Discovery] Source detection failed: ${err.message}`);
     }

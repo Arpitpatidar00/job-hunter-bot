@@ -291,3 +291,118 @@ export async function getAndIncrementCycle(kv) {
         return 1;
     }
 }
+
+// ── Hiring Velocity Surge Detection ─────────────────────────────────────────
+
+/**
+ * Detect sources experiencing a hiring velocity surge (>30% job volume
+ * increase vs their rolling average). Promotes surging sources to 'high'
+ * tier and adds a +15 priority bonus to accelerate crawling.
+ *
+ * @param {D1Database} db
+ * @returns {Promise<number>} Number of sources promoted.
+ */
+export async function detectHiringVelocitySurge(db) {
+    try {
+        const result = await db.prepare(
+            `SELECT url, last_job_count, avg_job_count, crawl_tier
+             FROM source_registry
+             WHERE enabled = 1
+               AND avg_job_count > 0
+               AND last_job_count > avg_job_count * 1.30
+               AND crawl_tier != 'high'`
+        ).all();
+
+        if (!result.success || !result.results?.length) return 0;
+
+        const stmts = result.results.map(src =>
+            db.prepare(
+                `UPDATE source_registry
+                 SET crawl_tier = 'high',
+                     priority_score = MIN(100, priority_score + 15)
+                 WHERE url = ?`
+            ).bind(src.url)
+        );
+
+        for (let i = 0; i < stmts.length; i += 100) {
+            await db.batch(stmts.slice(i, i + 100));
+        }
+
+        if (stmts.length > 0) {
+            logger.info(`[Intelligence] Hiring surge: promoted ${stmts.length} source(s) to 'high' tier`);
+        }
+
+        return stmts.length;
+    } catch (err) {
+        logger.warn(`[Intelligence] Hiring velocity surge detection failed: ${err.message}`);
+        return 0;
+    }
+}
+
+// ── Skill Trend Spike Detection ──────────────────────────────────────────────
+
+/**
+ * Compare this week's skill counts vs last week using daily_metrics.
+ * Skills with ≥20% growth (or newly appearing with ≥5 occurrences) are
+ * flagged in KV as `trend:spike:<skill>` with a 7-day TTL.
+ * The searchExpander and growthEngine read these flags to focus queries.
+ *
+ * @param {D1Database} db
+ * @param {KVNamespace} kv
+ * @returns {Promise<string[]>} List of spiking skill names.
+ */
+export async function detectTrendTrigger(db, kv) {
+    try {
+        const result = await db.prepare(
+            `SELECT date, skill_counts
+             FROM daily_metrics
+             WHERE date >= date('now', '-14 days')
+             ORDER BY date DESC`
+        ).all();
+
+        if (!result.success || !result.results?.length) return [];
+
+        const today = new Date().toISOString().slice(0, 10);
+        const thisWeek = {};
+        const lastWeek = {};
+
+        for (const row of result.results) {
+            const daysAgo = Math.round(
+                (new Date(today).getTime() - new Date(row.date).getTime()) / 86_400_000
+            );
+            let counts = {};
+            try { counts = JSON.parse(row.skill_counts || '{}'); } catch { continue; }
+
+            const target = daysAgo <= 7 ? thisWeek : lastWeek;
+            for (const [skill, count] of Object.entries(counts)) {
+                target[skill] = (target[skill] || 0) + count;
+            }
+        }
+
+        const spikingSkills = [];
+
+        for (const [skill, currentCount] of Object.entries(thisWeek)) {
+            const previousCount = lastWeek[skill] || 0;
+            if (previousCount === 0 && currentCount >= 5) {
+                spikingSkills.push(skill); // New skill with meaningful volume
+            } else if (previousCount > 0) {
+                const growthPct = ((currentCount - previousCount) / previousCount) * 100;
+                if (growthPct >= 20) spikingSkills.push(skill);
+            }
+        }
+
+        if (spikingSkills.length > 0 && kv) {
+            const writes = spikingSkills.map(skill =>
+                kv.put(`trend:spike:${skill.toLowerCase()}`, '1', { expirationTtl: 7 * 24 * 60 * 60 })
+                    .catch(e => logger.warn(`[Intelligence] KV spike write failed for ${skill}: ${e.message}`))
+            );
+            await Promise.allSettled(writes);
+            logger.info(`[Intelligence] Skill spikes detected: ${spikingSkills.join(', ')}`);
+        }
+
+        return spikingSkills;
+    } catch (err) {
+        logger.warn(`[Intelligence] Trend trigger detection failed: ${err.message}`);
+        return [];
+    }
+}

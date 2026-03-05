@@ -19,10 +19,10 @@ import logger from '../core/logger.js';
 const WINDOW_SIZE = 200;
 
 /** Absolute minimum threshold — never alert on pure junk. */
-const MIN_THRESHOLD = 35;
+const MIN_THRESHOLD = 30;
 
 /** Absolute maximum threshold — never be so strict you miss everything. */
-const MAX_THRESHOLD = 75;
+const MAX_THRESHOLD = 70;
 
 /** Auto-adjust step per cron run. */
 const ADJUST_STEP = 2;

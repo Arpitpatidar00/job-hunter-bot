@@ -20,10 +20,10 @@ import logger from '../core/logger.js';
 
 /** @type {Array<{tier: string, minScore: number, cycleInterval: number}>} */
 const CRAWL_TIERS = [
-    { tier: 'high', minScore: 70, cycleInterval: 1 },  // Every cron (15 min)
-    { tier: 'medium', minScore: 40, cycleInterval: 4 },  // ~1 hour
-    { tier: 'low', minScore: 10, cycleInterval: 12 },  // ~3 hours
-    { tier: 'dormant', minScore: 0, cycleInterval: 24 },  // ~6 hours
+    { tier: 'high', minScore: 65, cycleInterval: 1 },   // Every cron (15 min)
+    { tier: 'medium', minScore: 35, cycleInterval: 3 },  // ~45 min
+    { tier: 'low', minScore: 10, cycleInterval: 8 },     // ~2 hours
+    { tier: 'dormant', minScore: 0, cycleInterval: 16 },  // ~4 hours
 ];
 
 /**
@@ -48,23 +48,30 @@ export function assignTier(score) {
  */
 export function calculatePriority(source) {
     const totalAttempts = (source.success_count || 0) + (source.failure_count || 0);
-    if (totalAttempts === 0) return 50; // New source gets default medium priority
 
-    // 1. Job Yield (30%) — reward sources that produce jobs
+    // Exploration bonus: new sources (< 5 attempts) get boosted priority
+    // to ensure they are crawled frequently before enough data exists to score them.
+    if (totalAttempts < 5) {
+        // Scale from 70 (brand new) down to 55 as attempts grow
+        return Math.round(70 - (totalAttempts * 3));
+    }
+
+    // 1. Job Yield (25%) — reward sources that produce jobs
     const lastJobCount = source.last_job_count || 0;
     const avgJobCount = source.avg_job_count || 1;
     const yieldRatio = Math.min(lastJobCount / Math.max(avgJobCount, 1), 3); // cap at 3x
     const yieldScore = Math.min(100, yieldRatio * 33.3);
 
-    // 2. Freshness (25%) — how recently did this source produce new jobs
+    // 2. Freshness (20%) — gradual decay instead of cliff drops
     let freshnessScore = 50; // default
     if (source.last_new_job_at) {
         const hoursSinceNew = (Date.now() - new Date(source.last_new_job_at).getTime()) / 3_600_000;
         if (hoursSinceNew < 1) freshnessScore = 100;
-        else if (hoursSinceNew < 6) freshnessScore = 80;
-        else if (hoursSinceNew < 24) freshnessScore = 60;
-        else if (hoursSinceNew < 72) freshnessScore = 30;
-        else freshnessScore = 10;
+        else if (hoursSinceNew < 6) freshnessScore = 90;
+        else if (hoursSinceNew < 24) freshnessScore = 70;
+        else if (hoursSinceNew < 72) freshnessScore = 50;
+        else if (hoursSinceNew < 168) freshnessScore = 30; // 7 days
+        else freshnessScore = 15;
     }
 
     // 3. Reliability (20%) — success rate
@@ -80,13 +87,22 @@ export function calculatePriority(source) {
     const postingFreq = source.posting_frequency || 0;
     const relevanceScore = Math.min(100, postingFreq * 20); // 5+ per day → 100
 
-    // Weighted sum
+    // 6. Dedup penalty (10%) — penalize high-duplication sources
+    //    dup_ratio 0.0 = all unique jobs, 1.0 = all duplicates
+    const dupRatio = source.dup_ratio || 0;
+    // Penalty only kicks in above 80% duplication. 100% dup → score 0, 80% → score 100
+    const dedupScore = dupRatio > 0.8
+        ? Math.max(0, 100 - ((dupRatio - 0.8) / 0.2) * 100)
+        : 100;
+
+    // Weighted sum (rebalanced: yield 25%, freshness 20%, reliability 20%, consistency 15%, relevance 10%, dedup 10%)
     const priority = Math.round(
-        yieldScore * 0.30 +
-        freshnessScore * 0.25 +
+        yieldScore * 0.25 +
+        freshnessScore * 0.20 +
         reliabilityScore * 0.20 +
         consistencyScore * 0.15 +
-        relevanceScore * 0.10
+        relevanceScore * 0.10 +
+        dedupScore * 0.10
     );
 
     return Math.max(0, Math.min(100, priority));
@@ -105,7 +121,7 @@ export async function recalculatePriorities(db) {
         const result = await db.prepare(
             `SELECT url, type, success_count, failure_count, last_job_count,
                     avg_job_count, posting_frequency, last_new_job_at,
-                    total_jobs_found, consecutive_failures
+                    total_jobs_found, consecutive_failures, dup_ratio
              FROM source_registry WHERE enabled = 1`
         ).all();
 
@@ -113,13 +129,13 @@ export async function recalculatePriorities(db) {
 
         const stmts = [];
         for (const source of result.results) {
-            // Auto-disable sources with too many consecutive failures
-            if ((source.consecutive_failures || 0) >= 10) {
+            // Auto-disable sources with too many consecutive failures (raised from 10 to 20)
+            if ((source.consecutive_failures || 0) >= 20) {
                 stmts.push(
                     db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
                         .bind(source.url)
                 );
-                logger.warn(`[Intelligence] Auto-disabled source after 10 consecutive failures: ${source.url}`);
+                logger.warn(`[Intelligence] Auto-disabled source after 20 consecutive failures: ${source.url}`);
                 continue;
             }
 
@@ -134,6 +150,23 @@ export async function recalculatePriorities(db) {
                      WHERE url = ?`
                 ).bind(score, tier, nextCrawlAt, source.url)
             );
+        }
+
+        // Periodic re-enable: give disabled sources another chance every 48 hours
+        try {
+            const reEnableResult = await db.prepare(
+                `UPDATE source_registry
+                 SET enabled = 1, consecutive_failures = 0, crawl_tier = 'low', priority_score = 40
+                 WHERE enabled = 0
+                   AND crawl_tier = 'disabled'
+                   AND last_fetched_at < datetime('now', '-48 hours')`
+            ).run();
+            const reEnabled = reEnableResult?.meta?.changes || 0;
+            if (reEnabled > 0) {
+                logger.info(`[Intelligence] Re-enabled ${reEnabled} previously disabled sources for retry`);
+            }
+        } catch (reErr) {
+            logger.warn(`[Intelligence] Re-enable check failed: ${reErr.message}`);
         }
 
         // D1 batch (max 100 statements per batch)
@@ -163,22 +196,51 @@ export async function recalculatePriorities(db) {
 export async function getSourcesForCycle(db, cycleNumber) {
     try {
         // Always fetch high-priority sources
-        // For others, check if cycleNumber aligns with their interval
+        // For others, check if cycleNumber aligns with their interval (updated intervals)
         const result = await db.prepare(
             `SELECT url, type, name, priority_score, crawl_tier
              FROM source_registry
              WHERE enabled = 1
                AND (
                    crawl_tier = 'high'
-                   OR (crawl_tier = 'medium' AND ? % 4 = 0)
-                   OR (crawl_tier = 'low'    AND ? % 12 = 0)
-                   OR (crawl_tier = 'dormant' AND ? % 24 = 0)
+                   OR (crawl_tier = 'medium' AND ? % 3 = 0)
+                   OR (crawl_tier = 'low'    AND ? % 8 = 0)
+                   OR (crawl_tier = 'dormant' AND ? % 16 = 0)
                    OR crawl_tier IS NULL
                    OR priority_score IS NULL
                )`
         ).bind(cycleNumber, cycleNumber, cycleNumber).all();
 
-        return result.success ? result.results : [];
+        const tieredSources = result.success ? result.results : [];
+
+        // Exploration slot reservation: always include recently discovered sources
+        // (< 48 hours old) regardless of their tier, up to 5 per cycle.
+        // This ensures new sources get a fair crawl window before scoring kicks in.
+        let explorationSources = [];
+        try {
+            const explorationResult = await db.prepare(
+                `SELECT url, type, name, priority_score, crawl_tier
+                 FROM source_registry
+                 WHERE enabled = 1
+                   AND discovered_at > datetime('now', '-48 hours')
+                 ORDER BY discovered_at DESC
+                 LIMIT 5`
+            ).all();
+            explorationSources = explorationResult.success ? explorationResult.results : [];
+        } catch (expErr) {
+            logger.warn(`[Intelligence] Exploration slot query failed: ${expErr.message}`);
+        }
+
+        // Merge tiered + exploration sources, deduplicating by URL
+        const seenUrls = new Set(tieredSources.map(s => s.url));
+        for (const src of explorationSources) {
+            if (!seenUrls.has(src.url)) {
+                tieredSources.push(src);
+                seenUrls.add(src.url);
+            }
+        }
+
+        return tieredSources;
     } catch (err) {
         logger.warn(`[Intelligence] Failed to get sources for cycle ${cycleNumber}: ${err.message}`);
         return [];
@@ -194,17 +256,19 @@ export async function getSourcesForCycle(db, cycleNumber) {
  * @param {number} newJobCount - Number of NEW (not duplicate) jobs found.
  * @param {number} totalJobCount - Total jobs returned by the source.
  */
-export async function recordSourceYield(db, url, newJobCount, totalJobCount) {
+export async function recordSourceYield(db, url, newJobCount, totalJobCount, dupRatio = 0) {
     try {
         // Update running average: new_avg = old_avg * 0.7 + current * 0.3 (exponential moving average)
+        // Also track duplication ratio for priority scoring penalty
         await db.prepare(
             `UPDATE source_registry
              SET total_jobs_found = total_jobs_found + ?,
                  avg_job_count = COALESCE(avg_job_count, 0) * 0.7 + ? * 0.3,
                  last_new_job_at = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_new_job_at END,
-                 posting_frequency = COALESCE(posting_frequency, 0) * 0.8 + ? * 0.2
+                 posting_frequency = COALESCE(posting_frequency, 0) * 0.8 + ? * 0.2,
+                 dup_ratio = COALESCE(dup_ratio, 0) * 0.6 + ? * 0.4
              WHERE url = ?`
-        ).bind(newJobCount, totalJobCount, newJobCount, newJobCount, url).run();
+        ).bind(newJobCount, totalJobCount, newJobCount, newJobCount, dupRatio, url).run();
     } catch (err) {
         logger.warn(`[Intelligence] Failed to record yield for ${url}: ${err.message}`);
     }

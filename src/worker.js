@@ -20,7 +20,7 @@ import { sendAlert } from './notifications/notifications.js';
 
 // D1 Database Layer
 import {
-    insertJobIfNotExists, getActiveProfiles, hasSentAlert, markAlertSent,
+    insertJobIfNotExists, batchInsertJobs, getActiveProfiles, hasSentAlert, markAlertSent,
     recordTermFrequencies, getGlobalTermFrequencies,
     updateSourceStats, registerDiscoveredSource, getSourceMetrics,
     getEnabledSources, cleanupStaleJobs
@@ -75,6 +75,7 @@ async function queueHandler(batch, env) {
 // ── 1. Fetcher (Consumes FEED_QUEUE) ─────────────────────────────────────────
 async function processFeeds(messages, env) {
     const config = loadConfig();
+    const startTime = Date.now();
 
     // Each message.body is a source definition from scheduled()
     const allSources = messages.map(m => m.body);
@@ -105,60 +106,68 @@ async function processFeeds(messages, env) {
     // Run all connectors in parallel
     const { jobs, feedStats, totalItems, totalErrors } = await runAllConnectors(batchConfig);
 
-    // Record circuit breaker metrics
+    // ── Record circuit breaker metrics (batched — collect then write once) ──
     let crawlSuccesses = 0;
     let crawlFailures = 0;
+    const feedResultPromises = [];
+    const sourceStatPromises = [];
+
     for (const stat of feedStats) {
-        try {
-            await recordFeedResult(env.SEEN_JOBS, stat.url, {
+        feedResultPromises.push(
+            recordFeedResult(env.SEEN_JOBS, stat.url, {
                 success: !stat.error,
                 latencyMs: stat.durationMs || 0,
                 error: stat.error || '',
-            });
-        } catch (err) { logger.warn(`[Fetcher] recordFeedResult failed: ${err.message}`); }
+            }).catch(err => logger.warn(`[Fetcher] recordFeedResult failed: ${err.message}`))
+        );
         if (!stat.error) crawlSuccesses++; else crawlFailures++;
-        try {
-            await updateSourceStats(env.DB, stat.url, {
+        sourceStatPromises.push(
+            updateSourceStats(env.DB, stat.url, {
                 success: !stat.error,
                 jobCount: stat.count || 0,
-            });
-        } catch (err) { logger.warn(`[Fetcher] updateSourceStats failed: ${err.message}`); }
+            }).catch(err => logger.warn(`[Fetcher] updateSourceStats failed: ${err.message}`))
+        );
     }
+    // Fire KV + D1 stat writes in parallel (non-blocking)
+    await Promise.allSettled([...feedResultPromises, ...sourceStatPromises]);
 
-    // Intra-batch dedup + D1 insert + JOB_QUEUE dispatch
+    // ── Intra-batch dedup (fast in-memory) ──────────────────────────────────
     const seenHashes = new Set();
-    let newlyInsertedCount = 0;
-    let duplicateCount = 0;
-    let queueMsgs = 0;
-    const batchSkillCounts = {};
-    let remoteJobs = 0, hybridJobs = 0, onsiteJobs = 0;
-    let salarySum = 0, salaryCount = 0;
-    const perSourceNewJobs = new Map(); // Track per-source new job counts for yield recording
-    const jobsToQueue = []; // Collect jobs for batch send to JOB_QUEUE
+    const dedupedJobs = [];
+    let inMemoryDupes = 0;
 
     for (const job of jobs) {
         if (job.content_hash && seenHashes.has(job.content_hash)) {
-            duplicateCount++;
+            inMemoryDupes++;
             continue;
         }
         if (job.content_hash) seenHashes.add(job.content_hash);
+        dedupedJobs.push(job);
+    }
 
-        const { inserted } = await insertJobIfNotExists(env.DB, job);
-        if (!inserted) { duplicateCount++; continue; }
+    // ── BATCH D1 INSERT (eliminates per-job queries) ────────────────────────
+    const { inserted: newJobs, duplicates: d1Dupes } = await batchInsertJobs(env.DB, dedupedJobs);
+    const newlyInsertedCount = newJobs.length;
+    const duplicateCount = inMemoryDupes + d1Dupes;
 
-        newlyInsertedCount++;
+    // ── Track market signals from inserted jobs (aggregated) ────────────────
+    const batchSkillCounts = {};
+    let remoteJobs = 0, hybridJobs = 0, onsiteJobs = 0;
+    let salarySum = 0, salaryCount = 0;
+    const perSourceNewJobs = new Map();
+    const allTerms = [];
+
+    for (const job of newJobs) {
         // Track per-source yield
         const jobSourceUrl = job.sourceUrl || '';
         perSourceNewJobs.set(jobSourceUrl, (perSourceNewJobs.get(jobSourceUrl) || 0) + 1);
 
-        jobsToQueue.push(job);
-
-        // Track market signals
+        // Track skill counts
         if (job.matchedTerms?.length) {
             for (const term of job.matchedTerms) {
                 batchSkillCounts[term] = (batchSkillCounts[term] || 0) + 1;
             }
-            try { await recordTermFrequencies(env.DB, job.matchedTerms); } catch (err) { logger.warn(`[Fetcher] recordTermFrequencies failed: ${err.message}`); }
+            allTerms.push(...job.matchedTerms);
         }
 
         // Remote/location detection
@@ -175,22 +184,30 @@ async function processFeeds(messages, env) {
         }
     }
 
-    // Batch send to JOB_QUEUE: pack jobs into chunks (max ~50 per message to stay under 128KB)
-    // This reduces queue operations from hundreds to a handful per cycle.
+    // ── Record term frequencies in ONE batch call ───────────────────────────
+    if (allTerms.length > 0) {
+        try { await recordTermFrequencies(env.DB, allTerms); }
+        catch (err) { logger.warn(`[Fetcher] recordTermFrequencies failed: ${err.message}`); }
+    }
+
+    // ── Send new jobs to JOB_QUEUE in chunks ────────────────────────────────
     const JOB_CHUNK_SIZE = 50;
+    let queueMsgs = 0;
     let jobQueueSuccess = false;
     try {
-        for (let i = 0; i < jobsToQueue.length; i += JOB_CHUNK_SIZE) {
-            await env.JOB_QUEUE.send({ jobs: jobsToQueue.slice(i, i + JOB_CHUNK_SIZE) });
+        for (let i = 0; i < newJobs.length; i += JOB_CHUNK_SIZE) {
+            await env.JOB_QUEUE.send({ jobs: newJobs.slice(i, i + JOB_CHUNK_SIZE) });
         }
-        queueMsgs = Math.ceil(jobsToQueue.length / JOB_CHUNK_SIZE);
-        logger.info(`[Fetcher] Sent ${jobsToQueue.length} jobs in ${queueMsgs} queue messages`);
+        queueMsgs = Math.ceil(newJobs.length / JOB_CHUNK_SIZE);
+        if (newJobs.length > 0) {
+            logger.info(`[Fetcher] Sent ${newJobs.length} jobs in ${queueMsgs} queue messages`);
+        }
         jobQueueSuccess = true;
     } catch (err) {
         logger.error(`[Fetcher] JOB_QUEUE send failed: ${err.message}. Falling back to direct evaluation.`);
     }
 
-    // ── Daily Metrics (Phase 1: Core crawl + job metrics) ──────────────────
+    // ── Daily Metrics (ONE aggregated write instead of per-job) ────────────
     // Write metrics IMMEDIATELY after job processing, BEFORE evaluateJobs fallback.
     // This ensures metrics are recorded even if the Worker is killed during evaluation.
     try {
@@ -216,11 +233,11 @@ async function processFeeds(messages, env) {
     }
 
     // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
-    if (!jobQueueSuccess && jobsToQueue.length > 0) {
+    if (!jobQueueSuccess && newJobs.length > 0) {
         try {
-            const fakeMessages = [{ body: { jobs: jobsToQueue }, ack() { }, retry() { } }];
+            const fakeMessages = [{ body: { jobs: newJobs }, ack() { }, retry() { } }];
             await evaluateJobs(fakeMessages, env);
-            logger.info(`[Fetcher] Direct evaluation completed for ${jobsToQueue.length} jobs`);
+            logger.info(`[Fetcher] Direct evaluation completed for ${newJobs.length} jobs`);
         } catch (evalErr) {
             logger.error(`[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`);
         }
@@ -248,11 +265,16 @@ async function processFeeds(messages, env) {
         logger.warn(`[Discovery] Source detection failed: ${err.message}`);
     }
 
-    // Record yield for intelligence layer
+    // Record yield for intelligence layer (with dedup ratio for scoring penalty)
     for (const fs of feedStats) {
         if (!fs.error) {
             const sourceNewJobs = perSourceNewJobs.get(fs.url) || 0;
-            try { await recordSourceYield(env.DB, fs.url, sourceNewJobs, fs.count || 0); } catch (err) { logger.warn(`[Fetcher] recordSourceYield failed: ${err.message}`); }
+            const totalFromSource = fs.count || 0;
+            // Compute duplication ratio: 1.0 = all duplicates, 0.0 = all unique
+            const dupRatio = totalFromSource > 0
+                ? Math.max(0, Math.min(1, 1 - (sourceNewJobs / totalFromSource)))
+                : 0;
+            try { await recordSourceYield(env.DB, fs.url, sourceNewJobs, totalFromSource, dupRatio); } catch (err) { logger.warn(`[Fetcher] recordSourceYield failed: ${err.message}`); }
         }
     }
 
@@ -276,9 +298,11 @@ async function processFeeds(messages, env) {
     }
 }
 
-// ── 2. Evaluator (Consumes JOB_QUEUE) ────────────────────────────────────────
+// ── 2. Evaluator (Consumes JOB_QUEUE) — CPU-optimized ────────────────────────
 async function evaluateJobs(messages, env) {
     const config = loadConfig();
+    const EVAL_START = Date.now();
+    const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
 
     const profiles = await getActiveProfiles(env.DB);
     let activeProfiles = profiles.length ? profiles : [{ id: 'default', notification_threshold: config.notificationThreshold }];
@@ -295,75 +319,85 @@ async function evaluateJobs(messages, env) {
     let alertsQueued = 0;
     let scoreSum = 0;
     let scoreMax = 0;
+    let jobsEvaluated = 0;
+
+    // Pre-fetch global term frequencies ONCE for all jobs (1 D1 call instead of N)
+    const allMustTerms = config.searchRules?.mustMatch || [];
+    const globalIdfData = await getGlobalTermFrequencies(env.DB, allMustTerms);
 
     for (const msg of messages) {
         // Support both batched format { jobs: [...] } and legacy single job format
         const msgJobs = msg.body.jobs || [msg.body];
 
         for (const job of msgJobs) {
+            // Wall-time guard: stop before Worker timeout
+            if (Date.now() - EVAL_START > WALL_TIME_LIMIT_MS) {
+                logger.warn(`[Evaluator] Wall-time guard: evaluated ${jobsEvaluated} jobs in ${((Date.now() - EVAL_START) / 1000).toFixed(1)}s, deferring rest.`);
+                break;
+            }
+
             if (!isNewJob(job, config.timeWindowHours)) {
                 continue;
             }
+
+            jobsEvaluated++;
 
             const jobTextForAi = `${job.title} ${job.company || ''} ${job.categories?.join(' ') || ''}`;
             const jobVector = await generateEmbedding(env.AI, jobTextForAi);
             aiCallsCount++;
 
+            const semanticSim = cosineSimilarity(jobVector, profileVector);
+
+            // Score once using pre-fetched IDF data (no per-job D1 query)
+            let scoreResult = scoreJob(job, config, globalIdfData, semanticSim);
+
+            if (scoreResult.excluded) continue;
+
+            const { adjustedScore, feedbackDelta } = applyFeedbackBoost(scoreResult, prefWeights);
+            if (feedbackDelta !== 0) {
+                scoreResult.score = adjustedScore;
+                if (!scoreResult.breakdown) scoreResult.breakdown = {};
+                scoreResult.breakdown.feedbackBoost = feedbackDelta;
+            }
+
+            await recordJobScore(env.SEEN_JOBS, scoreResult.score);
+
             for (const profile of activeProfiles) {
+                const threshold = profile.notification_threshold || globalThreshold;
+
+                if (scoreResult.score < threshold) continue;
+
                 if (await hasSentAlert(env.DB, job.id, profile.id)) {
                     continue;
                 }
 
-                const tempResult = scoreJob(job, config, { totalDocs: 1, termCounts: {} });
-                const localTerms = tempResult.matchedSkills || [];
-                const idfData = await getGlobalTermFrequencies(env.DB, localTerms);
+                logger.info(`🚨 [Evaluator] Match for profile ${profile.id}: [${scoreResult.score}] ${job.title}`);
 
-                const semanticSim = cosineSimilarity(jobVector, profileVector);
-
-                let scoreResult = scoreJob(job, config, idfData, semanticSim);
-
-                if (scoreResult.excluded) continue;
-
-                const { adjustedScore, feedbackDelta } = applyFeedbackBoost(scoreResult, prefWeights);
-                if (feedbackDelta !== 0) {
-                    scoreResult.score = adjustedScore;
-                    if (!scoreResult.breakdown) scoreResult.breakdown = {};
-                    scoreResult.breakdown.feedbackBoost = feedbackDelta;
-                }
-
-                await recordJobScore(env.SEEN_JOBS, scoreResult.score);
-
-                const threshold = profile.notification_threshold || globalThreshold;
-
-                if (scoreResult.score >= threshold) {
-                    logger.info(`🚨 [Evaluator] Match for profile ${profile.id}: [${scoreResult.score}] ${job.title}`);
-
+                try {
+                    await env.ALERT_QUEUE.send({
+                        profileId: profile.id,
+                        job: job,
+                        scoreResult: scoreResult
+                    });
+                } catch (queueErr) {
+                    // DIRECT FALLBACK: Send alert inline when ALERT_QUEUE is rate-limited
+                    logger.warn(`[Evaluator] ALERT_QUEUE failed, sending alert directly: ${queueErr.message}`);
                     try {
-                        await env.ALERT_QUEUE.send({
-                            profileId: profile.id,
-                            job: job,
-                            scoreResult: scoreResult
+                        await sendAlert(job, scoreResult, {
+                            dryRun: config.dryRun,
+                            config,
+                            env,
+                            attempt: 1
                         });
-                    } catch (queueErr) {
-                        // DIRECT FALLBACK: Send alert inline when ALERT_QUEUE is rate-limited
-                        logger.warn(`[Evaluator] ALERT_QUEUE failed, sending alert directly: ${queueErr.message}`);
-                        try {
-                            await sendAlert(job, scoreResult, {
-                                dryRun: config.dryRun,
-                                config,
-                                env,
-                                attempt: 1
-                            });
-                        } catch (alertErr) {
-                            logger.error(`[Evaluator] Direct alert also failed: ${alertErr.message}`);
-                        }
+                    } catch (alertErr) {
+                        logger.error(`[Evaluator] Direct alert also failed: ${alertErr.message}`);
                     }
-
-                    await markAlertSent(env.DB, job.id, profile.id);
-                    alertsQueued++;
-                    scoreSum += scoreResult.score;
-                    scoreMax = Math.max(scoreMax, scoreResult.score);
                 }
+
+                await markAlertSent(env.DB, job.id, profile.id);
+                alertsQueued++;
+                scoreSum += scoreResult.score;
+                scoreMax = Math.max(scoreMax, scoreResult.score);
             }
         }
 

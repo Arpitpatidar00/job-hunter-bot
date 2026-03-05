@@ -62,15 +62,15 @@ describe('Dynamic Threshold Engine', () => {
         expect(t.adjusted).toBe(true);
     });
 
-    test('guardrails max 75', async () => {
-        await kv.put('thresh:effective', '74');
+    test('guardrails max 70', async () => {
+        await kv.put('thresh:effective', '69');
         const t = await getEffectiveThreshold(kv, 50, { matchedLastRun: 20 });
-        expect(t.effective).toBe(75); // Should cap at 75, not go to 76
+        expect(t.effective).toBe(70); // Should cap at 70, not go to 71
     });
 
-    test('guardrails min 35', async () => {
-        await kv.put('thresh:effective', '36');
+    test('guardrails min 30', async () => {
+        await kv.put('thresh:effective', '31');
         const t = await getEffectiveThreshold(kv, 50, { matchedLastRun: 0 });
-        expect(t.effective).toBe(35); // Should bottom at 35, not 34
+        expect(t.effective).toBe(30); // Should bottom at 30, not 29
     });
 });

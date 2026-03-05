@@ -9,7 +9,7 @@ import { recordFeedResult, isFeedCircuitOpen, getFeedHealthReport, resetFeedCirc
 class MockKV {
     constructor() { this.store = new Map(); }
     async get(key) { return this.store.get(key) || null; }
-    async put(key, val) { this.store.set(key, val); }
+    async put(key, val, options) { this.store.set(key, val); }
     async delete(key) { this.store.delete(key); }
 }
 

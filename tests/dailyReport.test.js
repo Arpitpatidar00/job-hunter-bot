@@ -218,10 +218,10 @@ describe('Daily Intelligence Report', () => {
 
         const report = formatDailyReport(data);
 
-        expect(report).toContain('Unique Stored: 1889');
+        expect(report).toContain('Unique Stored: 1,889');
         expect(report).toContain('Sources Scanned: 45');
-        expect(report).toContain('Raw Jobs: 1889');
-        expect(report).toContain('Active & Collecting');
+        expect(report).toContain('Raw Jobs: 1,889');
+        expect(report).toContain('Active');
         expect(report).not.toContain('undefined');
     });
 });

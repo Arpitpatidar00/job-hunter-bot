@@ -29,13 +29,22 @@ const CONCURRENCY = 3;
 function extractSlug(urlOrSlug) {
     try {
         const url = new URL(urlOrSlug);
+        // Validate it's an HTTP URL
+        if (!url.protocol.startsWith('http')) {
+            logger.warn(`[Ashby] Non-HTTP URL: ${urlOrSlug}`);
+            return urlOrSlug;
+        }
         const parts = url.pathname.split('/').filter(Boolean);
         // /posting-api/job-board/{slug} → last segment
         const boardIdx = parts.indexOf('job-board');
         if (boardIdx >= 0 && parts[boardIdx + 1]) return parts[boardIdx + 1];
         if (parts.length > 0) return parts[parts.length - 1];
     } catch {
-        // Plain slug
+        // Plain slug — validate it doesn't contain dangerous chars
+        if (/[<>"';\s]/.test(urlOrSlug)) {
+            logger.warn(`[Ashby] Invalid slug: ${urlOrSlug}`);
+            return '';
+        }
     }
     return urlOrSlug;
 }

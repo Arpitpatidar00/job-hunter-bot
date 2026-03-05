@@ -404,11 +404,22 @@ export function scoreJob(item, config, idfData = { totalDocs: 1, termCounts: {} 
         bonus += scoringBonuses.awsPresent ?? 4;
         reasons.push('Bonus: AWS present (+4)');
     }
-    if (['mongodb', 'express', 'react', 'node.js'].every(k => matched.includes(k))) {
+    // MERN stack detection — check for ANY 3 of 4 components (more flexible)
+    const mernParts = ['mongodb', 'express', 'react', 'node.js'];
+    const mernHits = mernParts.filter(k => matched.includes(k)).length;
+    if (mernHits >= 4) {
         bonus += scoringBonuses.fullMernStack ?? 10;
         reasons.push('Bonus: Full MERN stack (+10)');
+    } else if (mernHits >= 3) {
+        const partialBonus = Math.round((scoringBonuses.fullMernStack ?? 10) * 0.6);
+        bonus += partialBonus;
+        reasons.push(`Bonus: Partial MERN (${mernHits}/4) (+${partialBonus})`);
     }
-    if (text.includes('india') && locationHit) {
+    // Remote + India/worldwide boost (broadened)
+    if (locationHit && /\b(india|worldwide|global|anywhere|asia)\b/.test(text)) {
+        bonus += scoringBonuses.remoteIndia ?? 5;
+        reasons.push('Bonus: Remote + Target region (+5)');
+    } else if (text.includes('india') && locationHit) {
         bonus += scoringBonuses.remoteIndia ?? 5;
         reasons.push('Bonus: Remote India (+5)');
     }
@@ -454,9 +465,14 @@ export function scoreJob(item, config, idfData = { totalDocs: 1, termCounts: {} 
     // ── 10. Hard filter: minimum primary matches ────────────────────────────
     const totalHits = mustHits + shouldHits;
     const minPrimary = filters.minPrimaryMatches ?? 1;
-    if (totalHits === 0 && titleHits === 0) {
-        baseScore = Math.round(baseScore * 0.1);
+    if (totalHits === 0 && titleHits === 0 && niceHits === 0) {
+        // No matches at all — heavy penalty but don't zero it out
+        baseScore = Math.round(baseScore * 0.15);
         reasons.push('Hard filter: No primary stack matches');
+    } else if (totalHits === 0 && titleHits > 0) {
+        // Title matches but no skill keywords — moderate penalty
+        baseScore = Math.round(baseScore * 0.6);
+        reasons.push('Soft filter: Title match but no skill keywords');
     } else if (totalHits < minPrimary) {
         const scaleFactor = Math.max(0.5, totalHits / minPrimary);
         baseScore = Math.round(baseScore * scaleFactor);

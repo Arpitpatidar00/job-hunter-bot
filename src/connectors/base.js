@@ -16,6 +16,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 /**
  * Fetch a URL with an automatic AbortController timeout.
+ * Validates URL before fetching.
  *
  * @param {string} url
  * @param {RequestInit} [options={}]
@@ -23,6 +24,16 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  * @returns {Promise<Response>}
  */
 export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    // Validate URL
+    try {
+        const parsed = new URL(url);
+        if (!parsed.protocol.startsWith('http')) {
+            throw new Error(`Invalid URL protocol: ${parsed.protocol}`);
+        }
+    } catch (err) {
+        throw new Error(`Invalid URL "${url}": ${err.message}`);
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 

@@ -8,6 +8,13 @@
 	"build": {
 		"command": "npm run build"
 	},
+	// Enable production log streaming via `wrangler tail`
+	"observability": {
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		}
+	},
 	// Cron triggers for 3 staggered batches per cycle
 	// The batcher.js script maps:
 	//   :00/:15/:30/:45 → Batch 0
@@ -53,19 +60,19 @@
 		"consumers": [
 			{
 				"queue": "feed-queue",
-				"max_batch_size": 10,
+				"max_batch_size": 5,
 				"max_batch_timeout": 5,
-				"max_retries": 1
+				"max_retries": 2
 			},
 			{
 				"queue": "job-queue",
-				"max_batch_size": 20,
+				"max_batch_size": 5,
 				"max_batch_timeout": 5,
 				"max_retries": 3
 			},
 			{
 				"queue": "alert-queue",
-				"max_batch_size": 10,
+				"max_batch_size": 5,
 				"max_batch_timeout": 5,
 				"max_retries": 5
 			}

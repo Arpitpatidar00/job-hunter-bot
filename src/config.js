@@ -104,19 +104,22 @@ export function loadConfig() {
         ],
 
         synonyms: {
-            "react": ["reactjs", "react.js"],
-            "next.js": ["nextjs", "next js", "next.js"],
-            "node.js": ["nodejs", "node js", "node.js"],
+            "react": ["reactjs", "react.js", "react js"],
+            "next.js": ["nextjs", "next js", "next.js", "next"],
+            "node.js": ["nodejs", "node js", "node.js", "node"],
             "typescript": ["ts", "typescript"],
-            "javascript": ["js", "ecmascript", "es6", "es2015"],
-            "mongodb": ["mongo", "mongoose"],
-            "postgresql": ["postgres", "psql"],
+            "javascript": ["js", "ecmascript", "es6", "es2015", "es2020", "es2022"],
+            "mongodb": ["mongo", "mongoose", "mongodb atlas"],
+            "postgresql": ["postgres", "psql", "pg"],
             "express": ["expressjs", "express.js"],
-            "graphql": ["graph ql"],
-            "aws": ["amazon web services"],
-            "docker": ["containerization"],
+            "graphql": ["graph ql", "apollo graphql", "apollo"],
+            "aws": ["amazon web services", "amazon cloud"],
+            "docker": ["containerization", "containers"],
             "tailwindcss": ["tailwind", "tailwind css"],
             "nestjs": ["nest.js", "nest js"],
+            "redis": ["redis cache", "elasticache"],
+            "prisma": ["prisma orm"],
+            "rest api": ["restful", "rest", "restful api"],
         },
 
         weights: {
@@ -151,7 +154,7 @@ export function loadConfig() {
             seniorityPenalty: -8,
         },
 
-        notificationThreshold: 50,
+        notificationThreshold: 40,
 
         filters: {
             workPreference: ["remote", "remote-first", "distributed", "work from home", "wfh", "anywhere"],
@@ -165,14 +168,15 @@ export function loadConfig() {
 
         pollIntervalMs: 900000,
         timeWindowHours: 24,
-        fuzzyThreshold: 0.82,
-        maxConcurrentFeeds: 7,
+        fuzzyThreshold: 0.75,
+        maxConcurrentFeeds: 5,
         maxRetries: 3,
 
         // ── Self-Expanding Engine Configuration ────────────────────────────────
         searchExpansion: {
             enabled: true,
             queries: [
+                // Core role queries
                 'remote next.js developer jobs',
                 'node.js backend engineer remote',
                 'typescript fullstack developer remote',
@@ -180,21 +184,32 @@ export function loadConfig() {
                 'javascript engineer remote india',
                 'mern stack developer remote jobs',
                 'full stack developer remote hiring',
+                // Company-focused discovery
+                'startup hiring remote javascript engineer',
+                'series A startup remote developer openings',
+                'Y Combinator company hiring engineers remote',
+                // Technology-niche queries
+                'graphql api developer remote',
+                'serverless node.js engineer jobs',
+                'headless cms developer remote react',
+                // Regional diversity
+                'remote developer jobs europe node.js',
+                'software engineer remote APAC typescript',
             ],
-            maxSearchesPerCycle: 3,
-            maxDomainsPerSearch: 10,
+            maxSearchesPerCycle: 5,
+            maxDomainsPerSearch: 15,
         },
 
         crawlIntelligence: {
             enabled: true,
             /** Run priority recalculation every N cron cycles */
             recalcIntervalCycles: 4,
-            /** Run search expansion every N cron cycles */
-            searchIntervalCycles: 24,
-            /** Run career page probing every N cron cycles */
-            careerProbeIntervalCycles: 12,
+            /** Run search expansion every N cron cycles (was 24, now ~2 hours) */
+            searchIntervalCycles: 8,
+            /** Run career page probing every N cron cycles (was 12, now ~1.5 hours) */
+            careerProbeIntervalCycles: 6,
             /** Max domains to probe per career detection cycle */
-            maxCareerProbes: 5,
+            maxCareerProbes: 10,
         },
 
         dryRun: false,

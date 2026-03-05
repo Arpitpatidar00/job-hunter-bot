@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/database-D1%20SQLite-F38020?style=flat-square&logo=cloudflare" alt="D1">
   <img src="https://img.shields.io/badge/AI-Workers%20AI-F38020?style=flat-square&logo=cloudflare" alt="Workers AI">
   <img src="https://img.shields.io/badge/language-JavaScript-F7DF1E?style=flat-square&logo=javascript" alt="JavaScript">
-  <img src="https://img.shields.io/badge/tests-325%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-26%20suites-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-ISC-blue?style=flat-square" alt="License">
 </p>
 
@@ -216,7 +216,7 @@ The engine uses a **dual-key deduplication** strategy to prevent duplicate alert
 ```
 job-hunter-bot/
 ├── src/
-│   ├── worker.js                  # Cloudflare Worker entry point
+│   ├── worker.js                  # Cloudflare Worker entry point (v5.1)
 │   ├── config.js                  # Configuration loader
 │   ├── env.ts                     # Environment validation (Zod)
 │   │
@@ -244,7 +244,8 @@ job-hunter-bot/
 │   ├── intelligence/              # Adaptive crawl orchestration
 │   │   ├── sourceIntelligence.js  # Priority scoring & tier assignment
 │   │   ├── feedHealth.js          # Circuit breaker / health tracking
-│   │   └── threshold.js           # Dynamic notification threshold
+│   │   ├── threshold.js           # Dynamic notification threshold
+│   │   └── dailyReport.js         # Daily metrics accumulation & report formatting
 │   │
 │   ├── scoring/                   # Job relevance evaluation
 │   │   ├── relevance.js           # 7-layer scoring engine
@@ -267,9 +268,12 @@ job-hunter-bot/
 │       ├── runLock.js             # Cron execution lock
 │       └── feeds.js               # Feed state tracking
 │
-├── tests/                         # 24 test suites, 325 tests
-├── migrations/                    # D1 schema migrations (6 versions)
+├── tests/                         # 26 test suites
+├── migrations/                    # D1 schema migrations (7 versions)
+├── logs/                          # Runtime logs
+├── daily-report.js                # Standalone daily report runner (CLI)
 ├── config.json                    # Scoring rules, feeds, thresholds
+├── .env.example                   # Environment variable template
 ├── wrangler.jsonc                 # Cloudflare Worker config
 └── package.json
 ```
@@ -390,6 +394,11 @@ npm run deploy
 
 # Run tests
 npm test
+
+# Daily report (standalone CLI)
+node daily-report.js              # Full report → Discord + Telegram
+node daily-report.js --console    # Print to console only
+node daily-report.js --dry-run    # Same as --console
 ```
 
 ---
@@ -412,7 +421,7 @@ The engine's source coverage expands autonomously over time:
 
 ## 🧪 Testing
 
-The project includes **325 tests across 24 test suites** covering:
+The project includes **26 test suites** covering:
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
@@ -423,6 +432,7 @@ The project includes **325 tests across 24 test suites** covering:
 | Intelligence | 20+ | Priority scoring, tier assignment, cycling |
 | Career detection | 15+ | JSON-LD extraction, HTML parsing |
 | Search expansion | 15+ | Domain extraction, aggregator filtering |
+| Daily report | 20+ | Report correctness, formatting, metric accumulation |
 | Edge cases | 40+ | Empty inputs, Unicode, long content, perf |
 | E2E pipeline | 30+ | Happy path, irrelevant jobs, stale jobs, AI boost |
 | Free tier safety | 10+ | CPU benchmarks, write reduction |
@@ -476,6 +486,8 @@ npm run test:watch          # Watch mode
 |----------|--------|-------------|
 | `/health` | GET | System health + secret validation |
 | `/metrics` | GET | Source metrics, job counts, processing stats |
+| `/report` | GET | Daily intelligence report (plain text). Supports `?date=YYYY-MM-DD` |
+| `/report` | POST | Generate and send daily report to Discord/Telegram |
 | `/trigger` | POST | Manually trigger a full crawl cycle |
 
 ---
@@ -494,7 +506,9 @@ This engine is designed to scale into a **complete job intelligence platform**:
 - ✅ Dynamic threshold tuning
 - ✅ User feedback learning loop
 - ✅ Real-time Discord/Telegram alerts
-- ✅ 325 tests with comprehensive edge case coverage
+- ✅ Daily intelligence report (automated at midnight UTC + on-demand via `/report`)
+- ✅ Standalone CLI daily report runner (`daily-report.js`)
+- ✅ 26 test suites with comprehensive edge case coverage
 
 ### Future Potential
 

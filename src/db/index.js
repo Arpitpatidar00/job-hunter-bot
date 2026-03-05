@@ -3,7 +3,7 @@
  * @description Barrel export — re-exports all DAL functions for backward compatibility.
  */
 
-export { insertJobIfNotExists, cleanupStaleJobs } from './jobs.js';
+export { insertJobIfNotExists, batchInsertJobs, cleanupStaleJobs } from './jobs.js';
 export { getActiveProfiles, hasSentAlert, markAlertSent, saveProfileConfigVersion, getActiveProfileConfig } from './profiles.js';
 export { registerDiscoveredSource, getEnabledSources, updateSourceStats, disableUnreliableSource, getSourceMetrics } from './sources.js';
 export { recordTermFrequencies, getGlobalTermFrequencies } from './terms.js';

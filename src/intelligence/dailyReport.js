@@ -42,10 +42,13 @@ export async function incrementDailyMetrics(db, deltas) {
     const date = todayUTC();
 
     try {
+        // Build all statements and execute in a single batch
+        const stmts = [];
+
         // Ensure today's row exists
-        await db.prepare(
-            `INSERT OR IGNORE INTO daily_metrics (date) VALUES (?)`
-        ).bind(date).run();
+        stmts.push(
+            db.prepare(`INSERT OR IGNORE INTO daily_metrics (date) VALUES (?)`).bind(date)
+        );
 
         // Build dynamic SET clause from deltas
         const setClauses = [];
@@ -66,12 +69,17 @@ export async function incrementDailyMetrics(db, deltas) {
         }
 
         if (setClauses.length > 0) {
-            await db.prepare(
-                `UPDATE daily_metrics SET ${setClauses.join(', ')} WHERE date = ?`
-            ).bind(...values, date).run();
+            stmts.push(
+                db.prepare(
+                    `UPDATE daily_metrics SET ${setClauses.join(', ')} WHERE date = ?`
+                ).bind(...values, date)
+            );
         }
 
-        // Merge skill_counts JSON
+        // Execute INSERT + UPDATE in a single batch (2 statements = 1 D1 call)
+        await db.batch(stmts);
+
+        // Merge skill_counts JSON (separate since it needs a read-modify-write)
         if (deltas.skill_counts && Object.keys(deltas.skill_counts).length > 0) {
             await mergeSkillCounts(db, date, deltas.skill_counts);
         }
@@ -121,38 +129,60 @@ export async function getDailyReportData(db, options = {}) {
     const prevDate = new Date(new Date(date + 'T00:00:00Z').getTime() - 86400_000).toISOString().split('T')[0];
 
     try {
-        const [todayRes, yesterdayRes, sourceBreakdownRes, totalSourcesRes, jobCountRes, prevJobCountRes, alertCountRes, sourcesScannedRes, companiesRes] = await db.batch([
+        // ── Core queries (daily_metrics + jobs — these tables always exist) ──
+        const [todayRes, yesterdayRes, jobCountRes, prevJobCountRes, companiesRes] = await db.batch([
             db.prepare(`SELECT * FROM daily_metrics WHERE date = ?`).bind(date),
             db.prepare(`SELECT * FROM daily_metrics WHERE date = ?`).bind(prevDate),
-            db.prepare(`
-                SELECT crawl_tier,
-                       COUNT(*) as count,
-                       AVG(priority_score) as avg_score
-                FROM source_registry
-                WHERE enabled = 1
-                GROUP BY crawl_tier
-            `),
-            db.prepare(`
-                SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as active,
-                    SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) as disabled
-                FROM source_registry
-            `),
             // Ground-truth: count jobs inserted today directly from the jobs table
             db.prepare(`SELECT COUNT(*) as count FROM jobs WHERE date(fetched_at) = ?`).bind(date),
             // Ground-truth: count jobs inserted previous day
             db.prepare(`SELECT COUNT(*) as count FROM jobs WHERE date(fetched_at) = ?`).bind(prevDate),
-            // Ground-truth: count alerts sent today
-            db.prepare(`SELECT COUNT(*) as count FROM sent_alerts WHERE date(sent_at) = ?`).bind(date),
-            // Ground-truth: count sources that were fetched today
-            db.prepare(`SELECT COUNT(*) as count FROM source_registry WHERE date(last_fetched_at) = ?`).bind(date),
             // Ground-truth: count distinct companies (proxy for sources) today
             db.prepare(`SELECT COUNT(DISTINCT company) as count FROM jobs WHERE company != '' AND date(fetched_at) = ?`).bind(date),
         ]);
 
         const today = todayRes.results?.[0] || {};
         const prev = yesterdayRes.results?.[0] || {};
+
+        // ── Optional queries: source_registry (may not exist on all environments) ──
+        let sourceBreakdownRes = { results: [] };
+        let totalSourcesRes = { results: [{ total: 0, active: 0, disabled: 0 }] };
+        let sourcesScannedRes = { results: [{ count: 0 }] };
+        try {
+            [sourceBreakdownRes, totalSourcesRes, sourcesScannedRes] = await db.batch([
+                db.prepare(`
+                    SELECT crawl_tier,
+                           COUNT(*) as count,
+                           AVG(priority_score) as avg_score
+                    FROM source_registry
+                    WHERE enabled = 1
+                    GROUP BY crawl_tier
+                `),
+                db.prepare(`
+                    SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as active,
+                        SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) as disabled
+                    FROM source_registry
+                `),
+                // Ground-truth: count sources that were fetched today
+                db.prepare(`SELECT COUNT(*) as count FROM source_registry WHERE date(last_fetched_at) = ?`).bind(date),
+            ]);
+        } catch (err) {
+            logger.warn(`[DailyReport] source_registry not available: ${err.message}`);
+        }
+
+        // ── Optional queries: sent_alerts (may not exist on all environments) ──
+        let alertCountRes = { results: [{ count: 0 }] };
+        try {
+            const [res] = await db.batch([
+                db.prepare(`SELECT COUNT(*) as count FROM sent_alerts WHERE date(sent_at) = ?`).bind(date),
+            ]);
+            alertCountRes = res;
+        } catch (err) {
+            logger.warn(`[DailyReport] sent_alerts not available: ${err.message}`);
+        }
+
         const tiers = {};
         for (const row of (sourceBreakdownRes.results || [])) {
             tiers[row.crawl_tier || 'unknown'] = { count: row.count, avgScore: row.avg_score };
@@ -222,14 +252,17 @@ function pctChange(curr, prev) {
 function qualityIndex(avgScore, uniqueStored = 0) {
     // When no alerts have been sent (avgScore is 0), base quality on job volume
     if (avgScore === 0 || isNaN(avgScore)) {
+        if (uniqueStored >= 1000) return '🟢 High Volume — Active';
         if (uniqueStored >= 500) return '🟢 Active & Collecting';
-        if (uniqueStored > 0) return '🟡 Running';
+        if (uniqueStored >= 100) return '🟡 Moderate Volume';
+        if (uniqueStored > 0) return '🟡 Low Volume — Running';
         return '🔴 No Data';
     }
     if (avgScore >= 75) return '🟢 Excellent';
     if (avgScore >= 60) return '🟡 Strong';
     if (avgScore >= 45) return '🔵 Moderate';
-    return '� Fair';
+    if (avgScore >= 30) return '🟣 Fair';
+    return '🔴 Poor';
 }
 
 function resourceSafety(invocations) {
@@ -264,7 +297,19 @@ export function formatDailyReport(data) {
     const sourcesScanned = m('sources_scanned');
     const successRate = sourcesScanned > 0 ? Math.round((m('crawl_successes') / sourcesScanned) * 100) : 0;
     const alertsSent = m('alerts_sent');
-    const avgScore = alertsSent > 0 ? (m('score_sum') / alertsSent).toFixed(1) : '0';
+    // Prefer per-alert average; fall back to per-job average when no alerts sent
+    let avgScore;
+    if (alertsSent > 0 && m('score_sum') > 0) {
+        avgScore = (m('score_sum') / alertsSent).toFixed(1);
+    } else if (m('score_max') > 0) {
+        // No alerts sent but scoring happened — show max as indicator
+        avgScore = m('score_max').toString();
+    } else if (uniqueStored > 0) {
+        avgScore = '—';  // Jobs exist but haven't been scored yet
+    } else {
+        avgScore = '0';
+    }
+
     const highValueYield = totalRawJobs > 0 ? ((uniqueStored / totalRawJobs) * 100).toFixed(1) : '0';
     const totalJobs = uniqueStored + dupes;
     const relevancePass = totalJobs > 0 ? ((alertsSent / totalJobs) * 100).toFixed(0) : '0';
@@ -321,16 +366,16 @@ export function formatDailyReport(data) {
 ━━━━━━━━━━━━━━━━━━
 📡 CRAWL PERFORMANCE
 • Sources Scanned: ${sourcesScanned}
-• Success Rate: ${successRate}%
-• Raw Jobs: ${totalRawJobs}
-• Unique Stored: ${uniqueStored}
-• Duplicates Filtered: ${dupes}
+• Success Rate: ${successRate}%${successRate < 70 ? ' ⚠️ DEGRADED' : ''}
+• Raw Jobs: ${safeLocale(totalRawJobs)}
+• Unique Stored: ${safeLocale(uniqueStored)}${pctChange(uniqueStored, pm('unique_jobs_stored'))}
+• Duplicates Filtered: ${safeLocale(dupes)}
 • High-Value Yield: ${highValueYield}%
-• Relevance Pass Rate: ${relevancePass}%
+• Relevance Pass Rate: ${relevancePass}%${parseInt(relevancePass) === 0 && uniqueStored > 0 ? ' ⚠️ Tune scoring' : ''}
 
 ━━━━━━━━━━━━━━━━━━
 🔔 ALERT QUALITY
-• Alerts Sent: ${alertsSent}
+• Alerts Sent: ${alertsSent}${alertsSent === 0 && uniqueStored > 50 ? ' ⚠️ Check threshold' : ''}
 • Delivery Failures: ${m('alert_failures')}
 • Avg Score: ${avgScore}
 • Highest Score: ${m('score_max')}
@@ -359,8 +404,63 @@ ${topSkills.length > 0 ? `• Top 3: ${topSkills.map(([s, c]) => `${s} (${c})`).
 • Free Tier Usage: ${res.pct}%  ${res.emoji} ${res.label}
 
 ━━━━━━━━━━━━━━━━━━
+🔍 DIAGNOSTICS
+${getDiagnostics(successRate, alertsSent, uniqueStored, m('crawl_failures'), dupes, totalRawJobs)}
+
+━━━━━━━━━━━━━━━━━━
 • Cycles Today: ${m('cycles_completed')}
 ${getEngineStatus(successRate, alertsSent, newSources, uniqueStored)}`;
+}
+
+function getDiagnostics(successRate, alertsSent, uniqueStored, crawlFailures, dupes, rawJobs) {
+    const issues = [];
+    const healthy = [];
+
+    // Crawl health
+    if (successRate < 50) {
+        issues.push('🔴 Critical: Crawl success rate below 50% — check source endpoints');
+    } else if (successRate < 70) {
+        issues.push('🟡 Warning: Crawl success rate degraded — some sources failing');
+    } else {
+        healthy.push('🟢 Crawl health: Normal');
+    }
+
+    // Duplicate ratio
+    if (rawJobs > 0) {
+        const dupRatio = (dupes / rawJobs * 100).toFixed(0);
+        if (parseInt(dupRatio) > 95) {
+            issues.push(`🟡 High duplicate ratio (${dupRatio}%) — sources may overlap`);
+        } else if (parseInt(dupRatio) > 80) {
+            healthy.push(`🟢 Dedup ratio: ${dupRatio}% (normal for continuous crawl)`);
+        }
+    }
+
+    // Alert delivery
+    if (alertsSent === 0 && uniqueStored > 100) {
+        issues.push('🟡 Zero alerts despite job volume — scoring threshold may be too strict');
+    } else if (alertsSent > 0) {
+        healthy.push(`🟢 Alert pipeline: Active (${alertsSent} sent)`);
+    }
+
+    // D1 health
+    if (crawlFailures > 20) {
+        issues.push(`🟡 ${crawlFailures} crawl failures — circuit breakers may be triggered`);
+    }
+
+    // Job volume
+    if (uniqueStored === 0) {
+        issues.push('🔴 No new jobs stored — check D1 connectivity and feeds');
+    } else if (uniqueStored < 10) {
+        issues.push('🟡 Low job volume — consider adding more sources');
+    } else {
+        healthy.push(`🟢 Job pipeline: ${uniqueStored} unique stored`);
+    }
+
+    if (issues.length === 0) {
+        return '✅ All systems nominal\n' + healthy.slice(0, 3).map(h => `  ${h}`).join('\n');
+    }
+
+    return [...issues, ...healthy.slice(0, 2)].map(l => `  ${l}`).join('\n');
 }
 
 function getEngineStatus(successRate, alertsSent, newSources, uniqueStored = 0) {

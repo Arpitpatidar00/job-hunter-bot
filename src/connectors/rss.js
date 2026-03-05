@@ -215,7 +215,7 @@ async function fetchSingleFeed(feedUrl, maxRetries, sourceName) {
  * @returns {Promise<Array<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>>}
  */
 export async function fetchRssFeeds(feedSources, config) {
-    const limit = pLimit(config.maxConcurrentFeeds ?? 7);
+    const limit = pLimit(config.maxConcurrentFeeds ?? 5);
 
     const promises = feedSources.map(source =>
         limit(() => fetchSingleFeed(source.url, config.maxRetries ?? 3, source.name))

@@ -25,6 +25,11 @@ const CAREER_PATHS = [
     '/join-us',
     '/career',
     '/job-openings',
+    '/join',
+    '/team',
+    '/openings',
+    '/hiring',
+    '/work',
 ];
 
 /**
@@ -114,7 +119,7 @@ async function probeSingleDomain(domain) {
             // Check for job-like links
             const jobLinkCount = countJobLinks(html);
 
-            if (hasJsonLd || jobLinkCount >= 3) {
+            if (hasJsonLd || jobLinkCount >= 2) {
                 return {
                     careerUrl: res.url || url, // Follow redirects
                     hasJsonLd,

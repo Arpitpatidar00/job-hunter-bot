@@ -7,8 +7,9 @@
  *
  * Circuit breaker logic:
  *   - Opens (disables feed) after OPEN_THRESHOLD consecutive failures
- *   - Auto-recovers after COOLDOWN_SECONDS (via KV TTL on the open flag)
+ *   - Auto-recovers after dynamic cooldown with jitter (via KV TTL on the open flag)
  *   - Resets on first success after recovery
+ *   - Cooldown scales with consecutive failures (exponential backoff)
  */
 
 import logger from '../core/logger.js';
@@ -16,8 +17,11 @@ import logger from '../core/logger.js';
 /** Consecutive failures before circuit opens. */
 const OPEN_THRESHOLD = 5;
 
-/** Cooldown in seconds before a failed feed is retried (1 hour). */
-const COOLDOWN_SECONDS = 60 * 60;
+/** Base cooldown in seconds (15 minutes). Scales with failure count. */
+const BASE_COOLDOWN_SECONDS = 15 * 60;
+
+/** Maximum cooldown in seconds (4 hours). */
+const MAX_COOLDOWN_SECONDS = 4 * 60 * 60;
 
 /** KV TTL for health records — 30 days. */
 const HEALTH_TTL = 30 * 24 * 60 * 60;
@@ -41,6 +45,20 @@ function urlKey(url) {
 
 function healthKey(url) { return `feed:health:${urlKey(url)}`; }
 function circuitKey(url) { return `feed:circuit:${urlKey(url)}`; }
+
+/**
+ * Calculate dynamic cooldown with exponential backoff and jitter.
+ * @param {number} consecutiveFailures
+ * @returns {number} Cooldown in seconds.
+ */
+function calculateCooldown(consecutiveFailures) {
+    // Exponential: base * 2^(failures - threshold), capped at MAX
+    const factor = Math.pow(2, Math.max(0, consecutiveFailures - OPEN_THRESHOLD));
+    const cooldown = Math.min(MAX_COOLDOWN_SECONDS, BASE_COOLDOWN_SECONDS * factor);
+    // Add jitter (±20%) to prevent thundering herd
+    const jitter = cooldown * 0.2 * (Math.random() * 2 - 1);
+    return Math.round(cooldown + jitter);
+}
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
@@ -120,18 +138,23 @@ export async function recordFeedResult(kv, feedUrl, { success, latencyMs = 0, er
         record.successCount++;
         record.consecutiveFailures = 0;
         // Reset circuit if it was open
-        try { await kv.delete(circuitKey(feedUrl)); } catch { }
+        try { await kv.delete(circuitKey(feedUrl)); } catch (err) {
+            logger.warn(`[Circuit] Failed to reset circuit for ${feedUrl}: ${err.message}`);
+        }
     } else {
         record.failureCount++;
         record.consecutiveFailures++;
         record.lastError = error;
 
-        // Open circuit if threshold exceeded
+        // Open circuit if threshold exceeded — with dynamic cooldown
         if (record.consecutiveFailures >= OPEN_THRESHOLD) {
+            const cooldown = calculateCooldown(record.consecutiveFailures);
             try {
-                await kv.put(circuitKey(feedUrl), '1', { expirationTtl: COOLDOWN_SECONDS });
-            } catch { }
-            logger.warn(`[Circuit] OPEN for ${feedUrl} after ${record.consecutiveFailures} consecutive failures. Cooldown: ${COOLDOWN_SECONDS / 60}min`);
+                await kv.put(circuitKey(feedUrl), '1', { expirationTtl: cooldown });
+            } catch (err) {
+                logger.warn(`[Circuit] Failed to open circuit for ${feedUrl}: ${err.message}`);
+            }
+            logger.warn(`[Circuit] OPEN for ${feedUrl} after ${record.consecutiveFailures} consecutive failures. Cooldown: ${Math.round(cooldown / 60)}min`);
         }
     }
 

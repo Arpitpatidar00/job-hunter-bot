@@ -80,6 +80,51 @@ export async function updateSourceStats(db, url, { success, jobCount }) {
 }
 
 /**
+ * Batch update stats for multiple sources in one db.batch() call.
+ * Reduces D1 queries from N to 1 per batch.
+ *
+ * @param {D1Database} db
+ * @param {Array<{url: string, success: boolean, jobCount: number}>} statsList
+ */
+export async function batchUpdateSourceStats(db, statsList) {
+    if (!statsList || statsList.length === 0) return;
+
+    try {
+        const stmts = statsList.map(({ url, success, jobCount }) => {
+            if (success) {
+                return db.prepare(
+                    `UPDATE source_registry
+                     SET success_count = success_count + 1,
+                         consecutive_failures = 0,
+                         last_fetched_at = CURRENT_TIMESTAMP,
+                         last_job_count = ?
+                     WHERE url = ?`
+                ).bind(jobCount, url);
+            } else {
+                return db.prepare(
+                    `UPDATE source_registry
+                     SET failure_count = failure_count + 1,
+                         consecutive_failures = consecutive_failures + 1,
+                         last_fetched_at = CURRENT_TIMESTAMP
+                     WHERE url = ?`
+                ).bind(url);
+            }
+        });
+
+        // D1 batch limit: 100 statements
+        for (let i = 0; i < stmts.length; i += 40) {
+            await db.batch(stmts.slice(i, i + 40));
+        }
+    } catch (err) {
+        logger.warn(`[D1] Batch source stats update failed: ${err.message}`);
+        // Fall back to individual updates
+        for (const stat of statsList) {
+            await updateSourceStats(db, stat.url, stat).catch(() => { });
+        }
+    }
+}
+
+/**
  * Disable a source that has exceeded the failure threshold.
  *
  * @param {D1Database} db

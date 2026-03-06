@@ -49,11 +49,11 @@ export function assignTier(score) {
 export function calculatePriority(source) {
     const totalAttempts = (source.success_count || 0) + (source.failure_count || 0);
 
-    // Exploration bonus: new sources (< 5 attempts) get boosted priority
+    // Exploration bonus: new sources (< 10 attempts) get boosted priority
     // to ensure they are crawled frequently before enough data exists to score them.
-    if (totalAttempts < 5) {
-        // Scale from 70 (brand new) down to 55 as attempts grow
-        return Math.round(70 - (totalAttempts * 3));
+    if (totalAttempts < 10) {
+        // Scale from 70 (brand new) down to 52 as attempts grow
+        return Math.round(70 - (totalAttempts * 1.8));
     }
 
     // 1. Job Yield (25%) — reward sources that produce jobs
@@ -87,12 +87,12 @@ export function calculatePriority(source) {
     const postingFreq = source.posting_frequency || 0;
     const relevanceScore = Math.min(100, postingFreq * 20); // 5+ per day → 100
 
-    // 6. Dedup penalty (10%) — penalize high-duplication sources
+    // Dedup penalty (10%): penalize high-duplication sources
     //    dup_ratio 0.0 = all unique jobs, 1.0 = all duplicates
     const dupRatio = source.dup_ratio || 0;
-    // Penalty only kicks in above 80% duplication. 100% dup → score 0, 80% → score 100
-    const dedupScore = dupRatio > 0.8
-        ? Math.max(0, 100 - ((dupRatio - 0.8) / 0.2) * 100)
+    // Penalty kicks in above 60% duplication (was 80%). 100% dup → score 0, 60% → score 100
+    const dedupScore = dupRatio > 0.6
+        ? Math.max(0, 100 - ((dupRatio - 0.6) / 0.4) * 100)
         : 100;
 
     // Weighted sum (rebalanced: yield 25%, freshness 20%, reliability 20%, consistency 15%, relevance 10%, dedup 10%)
@@ -222,7 +222,7 @@ export async function getSourcesForCycle(db, cycleNumber) {
                 `SELECT url, type, name, priority_score, crawl_tier
                  FROM source_registry
                  WHERE enabled = 1
-                   AND discovered_at > datetime('now', '-48 hours')
+                   AND discovered_at > datetime('now', '-72 hours')
                  ORDER BY discovered_at DESC
                  LIMIT 5`
             ).all();

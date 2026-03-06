@@ -52,8 +52,27 @@ export async function hasSentAlert(db, jobId, profileId) {
  * @param {string} jobId
  * @param {string} profileId
  */
+/**
+ * Record an alert was sent to a profile.
+ * Issue 2 fix: Verify the job exists in the DB first to avoid
+ * D1_ERROR: FOREIGN KEY constraint failed, which causes duplicate alert risk.
+ *
+ * @param {D1Database} db
+ * @param {string} jobId
+ * @param {string} profileId
+ */
 export async function markAlertSent(db, jobId, profileId) {
     try {
+        // Guard: only insert if the job row still exists (prevents FK violation)
+        const jobExists = await db.prepare(
+            `SELECT 1 FROM jobs WHERE id = ? LIMIT 1`
+        ).bind(jobId).first();
+
+        if (!jobExists) {
+            logger.warn(`[D1] markAlertSent skipped: job ${jobId} not found in jobs table (FK guard)`);
+            return;
+        }
+
         await db.prepare(
             `INSERT OR IGNORE INTO sent_alerts (job_id, profile_id) VALUES (?, ?)`
         ).bind(jobId, profileId).run();

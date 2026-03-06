@@ -15,7 +15,7 @@ import logger from './core/logger.js';
 import { validateEnv } from './env.ts';
 import { runAllConnectors } from './connectors/index.js';
 import { buildSourceList } from './connectors/base.js';
-import { scoreJob, isNewJob } from './scoring/relevance.js';
+import { scoreJob, isNewJob, MINIMUM_ALERT_SCORE } from './scoring/relevance.js';
 import { sendAlert } from './notifications/notifications.js';
 
 // D1 Database Layer
@@ -42,7 +42,7 @@ import { getEffectiveThreshold, recordJobScore } from './intelligence/threshold.
 import { applyFeedbackBoost, getPreferenceWeights } from './scoring/feedback.js';
 
 // AI
-import { generateEmbedding, cosineSimilarity } from './notifications/ai.js';
+import { generateEmbedding, cosineSimilarity, resetAiCallCount } from './notifications/ai.js';
 
 // ── JSON Response Helper ─────────────────────────────────────────────────────
 
@@ -51,6 +51,57 @@ function jsonResponse(data, status = 200) {
         status,
         headers: { 'Content-Type': 'application/json' },
     });
+}
+
+// ── Retry Helper (Issue 3) ────────────────────────────────────────────────────
+/**
+ * Retry an async function with exponential backoff + jitter.
+ * Addresses "Queue send failed: Too Many Requests" by respecting Cloudflare
+ * Queue rate limits instead of immediately falling back to direct execution.
+ *
+ * @param {() => Promise<any>} fn - Async function to call
+ * @param {number} [maxRetries=3] - Maximum retry attempts
+ * @param {number} [baseDelayMs=500] - Base delay in ms (doubles each attempt)
+ * @returns {Promise<any>}
+ */
+async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
+    let lastErr;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            if (attempt < maxRetries) {
+                const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 100;
+                logger.warn(`[Retry] Attempt ${attempt + 1}/${maxRetries + 1} failed (${err.message}), retrying in ${Math.round(delay)}ms...`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+    throw lastErr;
+}
+
+// ── Slim Job Projection (Issue 4) ────────────────────────────────────────────
+/**
+ * Return only the fields needed by the Evaluator from a job object.
+ * Drops contentSnippet, description, body, and other heavy text fields
+ * to stay under the 128 KB Cloudflare Queue payload limit.
+ */
+function slimJob(job) {
+    return {
+        id: job.id,
+        title: job.title,
+        company: job.company,
+        url: job.url,
+        link: job.link,
+        categories: job.categories,
+        matchedTerms: job.matchedTerms,
+        content_hash: job.content_hash,
+        sourceUrl: job.sourceUrl,
+        publishedAt: job.publishedAt,
+        isoDate: job.isoDate,
+        pubDate: job.pubDate,
+    };
 }
 
 // ── Queue Router ─────────────────────────────────────────────────────────────
@@ -191,12 +242,25 @@ async function processFeeds(messages, env) {
     }
 
     // ── Send new jobs to JOB_QUEUE in chunks ────────────────────────────────
-    const JOB_CHUNK_SIZE = 50;
+    // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost.
+    // Issue 4: slimJob() strips heavy text fields to stay under 128KB limit.
+    // Issue 3: withRetry() absorbs Cloudflare Queue rate-limit errors before fallback.
+    const JOB_CHUNK_SIZE = 20;
     let queueMsgs = 0;
     let jobQueueSuccess = false;
     try {
         for (let i = 0; i < newJobs.length; i += JOB_CHUNK_SIZE) {
-            await env.JOB_QUEUE.send({ jobs: newJobs.slice(i, i + JOB_CHUNK_SIZE) });
+            const slimChunk = newJobs.slice(i, i + JOB_CHUNK_SIZE).map(slimJob);
+            const payload = { jobs: slimChunk };
+
+            // Issue 4: Pre-flight size check — skip gracefully if still over limit
+            const payloadSize = JSON.stringify(payload).length;
+            if (payloadSize > 100_000) {
+                logger.warn(`[Fetcher] JOB_QUEUE chunk too large (${payloadSize} bytes), skipping ${slimChunk.length} jobs to avoid Payload Too Large error.`);
+                continue;
+            }
+
+            await withRetry(() => env.JOB_QUEUE.send(payload));
         }
         queueMsgs = Math.ceil(newJobs.length / JOB_CHUNK_SIZE);
         if (newJobs.length > 0) {
@@ -204,7 +268,7 @@ async function processFeeds(messages, env) {
         }
         jobQueueSuccess = true;
     } catch (err) {
-        logger.error(`[Fetcher] JOB_QUEUE send failed: ${err.message}. Falling back to direct evaluation.`);
+        logger.error(`[Fetcher] JOB_QUEUE send failed after retries: ${err.message}. Falling back to direct evaluation.`);
     }
 
     // ── Daily Metrics (ONE aggregated write instead of per-job) ────────────
@@ -323,7 +387,11 @@ async function processFeeds(messages, env) {
 async function evaluateJobs(messages, env) {
     const config = loadConfig();
     const EVAL_START = Date.now();
-    const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
+    // Issue 1: Tightened from 25s→22s to give larger margin before the 30s hard kill
+    const WALL_TIME_LIMIT_MS = 22_000;
+
+    // Issue 5: Reset per-invocation AI call counter at the start of each evaluateJobs run
+    resetAiCallCount();
 
     const profiles = await getActiveProfiles(env.DB);
     let activeProfiles = profiles.length ? profiles : [{ id: 'default', notification_threshold: config.notificationThreshold }];
@@ -386,7 +454,9 @@ async function evaluateJobs(messages, env) {
             for (const profile of activeProfiles) {
                 const threshold = profile.notification_threshold || globalThreshold;
 
-                if (scoreResult.score < threshold) continue;
+                // Enforce MINIMUM_ALERT_SCORE=50 floor — no alert if score < 50 regardless of profile threshold
+                const effectiveThreshold = Math.max(threshold, MINIMUM_ALERT_SCORE);
+                if (scoreResult.score < effectiveThreshold) continue;
 
                 if (await hasSentAlert(env.DB, job.id, profile.id)) {
                     continue;
@@ -395,14 +465,15 @@ async function evaluateJobs(messages, env) {
                 logger.info(`🚨 [Evaluator] Match for profile ${profile.id}: [${scoreResult.score}] ${job.title}`);
 
                 try {
-                    await env.ALERT_QUEUE.send({
+                    // Issue 3: Wrap ALERT_QUEUE.send with exponential-backoff retry
+                    await withRetry(() => env.ALERT_QUEUE.send({
                         profileId: profile.id,
                         job: job,
                         scoreResult: scoreResult
-                    });
+                    }));
                 } catch (queueErr) {
-                    // DIRECT FALLBACK: Send alert inline when ALERT_QUEUE is rate-limited
-                    logger.warn(`[Evaluator] ALERT_QUEUE failed, sending alert directly: ${queueErr.message}`);
+                    // DIRECT FALLBACK: Send alert inline only after retries exhausted
+                    logger.warn(`[Evaluator] ALERT_QUEUE failed after retries, sending alert directly: ${queueErr.message}`);
                     try {
                         await sendAlert(job, scoreResult, {
                             dryRun: config.dryRun,
@@ -489,6 +560,160 @@ async function sendAlerts(messages, env) {
     }
 }
 
+/**
+ * Cron producer implementation — contains the full business logic.
+ * Issue 7: Extracted so the exported scheduled() can wrap it in a try-catch.
+ */
+async function _scheduledImpl(event, env, ctx) {
+    const config = loadConfig();
+    const intel = config.crawlIntelligence || {};
+    const isIntelEnabled = intel.enabled !== false;
+
+    const cycleNumber = await getAndIncrementCycle(env.SEEN_JOBS);
+    logger.info(`[Producer] Cron cycle #${cycleNumber} fired.`);
+
+    // ── 1. Build source list: config sources + D1 registry sources ────────
+    const configSources = buildSourceList(config);
+
+    let registrySources = [];
+    try {
+        registrySources = await getEnabledSources(env.DB);
+    } catch (err) { logger.warn(`[Producer] D1 registry query failed: ${err.message}`); }
+
+    const configUrls = new Set(configSources.map(s => s.url));
+    const additionalSources = registrySources.filter(s => !configUrls.has(s.url));
+    const allSources = [...configSources, ...additionalSources];
+
+    // ── 2. Priority-based source selection ────────────────────────────────
+    let sourcesToCrawl;
+    if (isIntelEnabled) {
+        try {
+            const prioritySources = await getSourcesForCycle(env.DB, cycleNumber);
+            sourcesToCrawl = [
+                ...configSources,
+                ...prioritySources.filter(s => !configUrls.has(s.url)),
+            ];
+            logger.info(`[Producer] Intelligence: ${sourcesToCrawl.length} sources selected (${configSources.length} config + ${prioritySources.filter(s => !configUrls.has(s.url)).length} registry)`);
+        } catch (err) {
+            logger.warn(`[Producer] Intelligence fallback: ${err.message}`);
+            sourcesToCrawl = allSources;
+        }
+    } else {
+        sourcesToCrawl = allSources;
+    }
+
+    logger.info(`[Producer] Broadcasting ${sourcesToCrawl.length} sources to FEED_QUEUE...`);
+
+    // Issue 3: Use withRetry to absorb Cloudflare Queue rate-limit bursts before falling back
+    let queueSuccess = false;
+    try {
+        const batchMessages = sourcesToCrawl.map(s => ({ body: s }));
+        // sendBatch supports up to 100 messages per call
+        for (let i = 0; i < batchMessages.length; i += 100) {
+            await withRetry(() => env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100)));
+        }
+        logger.info(`[Producer] Successfully queued ${sourcesToCrawl.length} sources`);
+        queueSuccess = true;
+    } catch (err) {
+        logger.error(`[Producer] Queue send failed after retries: ${err.message}. Falling back to DIRECT processing.`);
+    }
+
+    // ── DIRECT FALLBACK: Process feeds inline when queues are rate-limited ──
+    // Use a wall-time guard to stop before the Worker timeout (30s for cron on free tier)
+    if (!queueSuccess) {
+        const directStart = Date.now();
+        const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
+        const DIRECT_BATCH_SIZE = 5; // Smaller batches for faster turnaround
+        let directProcessed = 0;
+        logger.info(`[Producer] Direct mode: processing ${sourcesToCrawl.length} sources inline...`);
+        const fakeMessages = sourcesToCrawl.map(s => ({ body: s, ack() { }, retry() { } }));
+        for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
+            if (Date.now() - directStart > WALL_TIME_LIMIT_MS) {
+                logger.warn(`[Producer] Wall-time guard: processed ${directProcessed}/${sourcesToCrawl.length} sources in ${((Date.now() - directStart) / 1000).toFixed(1)}s, deferring rest to next cycle.`);
+                break;
+            }
+            try {
+                await processFeeds(fakeMessages.slice(i, i + DIRECT_BATCH_SIZE), env);
+                directProcessed += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
+            } catch (err) {
+                logger.error(`[Producer] Direct batch ${Math.floor(i / DIRECT_BATCH_SIZE)} failed: ${err.message}`);
+            }
+        }
+        logger.info(`[Producer] Direct processing: ${directProcessed}/${sourcesToCrawl.length} sources completed.`);
+    }
+
+    // ── 3. Periodic intelligence tasks ────────────────────────────────────
+
+    if (isIntelEnabled && cycleNumber % (intel.recalcIntervalCycles || 4) === 0) {
+        try {
+            const updated = await recalculatePriorities(env.DB);
+            logger.info(`[Intelligence] Priority recalculation: ${updated} sources updated`);
+        } catch (err) {
+            logger.warn(`[Intelligence] Priority recalc failed: ${err.message}`);
+        }
+    }
+
+    if (isIntelEnabled && cycleNumber % (intel.careerProbeIntervalCycles || 4) === 0) {
+        try {
+            const domains = await getPendingDomains(env.DB, intel.maxCareerProbes || 15);
+            if (domains.length > 0) {
+                const registered = await probeDomainsForCareers(env.DB, domains, intel.maxCareerProbes || 15);
+                logger.info(`[CareerDetector] Probed ${domains.length} domains, registered ${registered.length} career pages`);
+                if (registered.length > 0) {
+                    await incrementDailyMetrics(env.DB, { new_sources_career: registered.length });
+                }
+            }
+        } catch (err) {
+            logger.warn(`[CareerDetector] Career probing failed: ${err.message}`);
+        }
+    }
+
+    if (isIntelEnabled && config.searchExpansion?.enabled && cycleNumber % (intel.searchIntervalCycles || 6) === 0) {
+        try {
+            const knownUrls = new Set(allSources.map(s => s.url));
+            const { newAtsSources, newDomains } = await runSearchExpansion(
+                env.DB,
+                config.searchExpansion.queries || [],
+                knownUrls,
+                env.SEEN_JOBS,                                               // ← FIX: pass kv so DDG cooldown is tracked & cleared
+                config.searchExpansion.maxSearchesPerCycle || 8,
+                config.searchExpansion.maxDomainsPerSearch || 20
+            );
+            logger.info(`[SearchExpander] Expansion: ${newAtsSources} ATS sources, ${newDomains} domains queued`);
+            if (newAtsSources > 0 || newDomains > 0) {
+                await incrementDailyMetrics(env.DB, { new_sources_search: newAtsSources, new_domains_queued: newDomains });
+            }
+        } catch (err) {
+            logger.warn(`[SearchExpander] Search expansion failed: ${err.message}`);
+        }
+    }
+
+    try {
+        await cleanupStaleJobs(env.DB, 30);
+    } catch (err) { logger.warn(`[Producer] Cleanup failed: ${err.message}`); }
+
+    // ── Daily Metrics: track cycle ─────────────────────────────────────
+    try {
+        await incrementDailyMetrics(env.DB, { cycles_completed: 1, worker_invocations: 1 });
+    } catch (err) { logger.error(`[Producer] Daily metrics update failed: ${err.message}`); }
+
+    // ── Daily Intelligence Report (trigger at midnight UTC cycle) ──────
+    const hourUTC = new Date().getUTCHours();
+    const minuteUTC = new Date().getUTCMinutes();
+    if (hourUTC === 0 && minuteUTC < 15) {
+        try {
+            // At midnight UTC, report on the PREVIOUS day's complete data
+            const yesterday = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
+            const result = await sendDailyReport(env.DB, env, { reportDate: yesterday });
+            logger.info(`[DailyReport] Sent to: ${result.channels.join(', ') || 'none'}`);
+        } catch (err) {
+            logger.warn(`[DailyReport] Failed: ${err.message}`);
+        }
+    }
+
+    logger.info(`[Producer] Cycle #${cycleNumber} dispatch complete.`);
+}
+
 // ── Worker Export ─────────────────────────────────────────────────────────────
 
 export default {
@@ -547,11 +772,12 @@ export default {
                 try {
                     const batchMessages = allSources.map(s => ({ body: s }));
                     for (let i = 0; i < batchMessages.length; i += 100) {
-                        await env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100));
+                        // Issue 3: Retry with backoff before falling back to direct
+                        await withRetry(() => env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100)));
                     }
                     sent = allSources.length;
                 } catch (err) {
-                    logger.warn(`[Trigger] Queue send failed: ${err.message}. Using direct processing.`);
+                    logger.warn(`[Trigger] Queue send failed after retries: ${err.message}. Using direct processing.`);
                     queueFailed = true;
                 }
 
@@ -588,157 +814,31 @@ export default {
 
     /**
      * Cron producer — Self-Expanding Engine scheduler.
+     * Issue 7 fix: Wraps _scheduledImpl in a global try-catch so any unhandled
+     * exception logs a descriptive message + stack trace instead of just the cron string.
      */
     async scheduled(event, env, ctx) {
-        const config = loadConfig();
-        const intel = config.crawlIntelligence || {};
-        const isIntelEnabled = intel.enabled !== false;
-
-        const cycleNumber = await getAndIncrementCycle(env.SEEN_JOBS);
-        logger.info(`[Producer] Cron cycle #${cycleNumber} fired.`);
-
-        // ── 1. Build source list: config sources + D1 registry sources ────────
-        const configSources = buildSourceList(config);
-
-        let registrySources = [];
         try {
-            registrySources = await getEnabledSources(env.DB);
-        } catch (err) { logger.warn(`[Producer] D1 registry query failed: ${err.message}`); }
-
-        const configUrls = new Set(configSources.map(s => s.url));
-        const additionalSources = registrySources.filter(s => !configUrls.has(s.url));
-        const allSources = [...configSources, ...additionalSources];
-
-        // ── 2. Priority-based source selection ────────────────────────────────
-        let sourcesToCrawl;
-        if (isIntelEnabled) {
-            try {
-                const prioritySources = await getSourcesForCycle(env.DB, cycleNumber);
-                sourcesToCrawl = [
-                    ...configSources,
-                    ...prioritySources.filter(s => !configUrls.has(s.url)),
-                ];
-                logger.info(`[Producer] Intelligence: ${sourcesToCrawl.length} sources selected (${configSources.length} config + ${prioritySources.filter(s => !configUrls.has(s.url)).length} registry)`);
-            } catch (err) {
-                logger.warn(`[Producer] Intelligence fallback: ${err.message}`);
-                sourcesToCrawl = allSources;
-            }
-        } else {
-            sourcesToCrawl = allSources;
-        }
-
-        logger.info(`[Producer] Broadcasting ${sourcesToCrawl.length} sources to FEED_QUEUE...`);
-
-        // Use batch send to avoid queue rate limiting
-        let queueSuccess = false;
-        try {
-            const batchMessages = sourcesToCrawl.map(s => ({ body: s }));
-            // sendBatch supports up to 100 messages per call
-            for (let i = 0; i < batchMessages.length; i += 100) {
-                await env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100));
-            }
-            logger.info(`[Producer] Successfully queued ${sourcesToCrawl.length} sources`);
-            queueSuccess = true;
+            await _scheduledImpl(event, env, ctx);
         } catch (err) {
-            logger.error(`[Producer] Queue send failed: ${err.message}. Falling back to DIRECT processing.`);
+            logger.error(`[Scheduled] Unhandled error in cron "${event.cron}": ${err.message}`, { stack: err.stack });
         }
-
-        // ── DIRECT FALLBACK: Process feeds inline when queues are rate-limited ──
-        // Use a wall-time guard to stop before the Worker timeout (30s for cron on free tier)
-        if (!queueSuccess) {
-            const directStart = Date.now();
-            const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
-            const DIRECT_BATCH_SIZE = 5; // Smaller batches for faster turnaround
-            let directProcessed = 0;
-            logger.info(`[Producer] Direct mode: processing ${sourcesToCrawl.length} sources inline...`);
-            const fakeMessages = sourcesToCrawl.map(s => ({ body: s, ack() { }, retry() { } }));
-            for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
-                if (Date.now() - directStart > WALL_TIME_LIMIT_MS) {
-                    logger.warn(`[Producer] Wall-time guard: processed ${directProcessed}/${sourcesToCrawl.length} sources in ${((Date.now() - directStart) / 1000).toFixed(1)}s, deferring rest to next cycle.`);
-                    break;
-                }
-                try {
-                    await processFeeds(fakeMessages.slice(i, i + DIRECT_BATCH_SIZE), env);
-                    directProcessed += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
-                } catch (err) {
-                    logger.error(`[Producer] Direct batch ${Math.floor(i / DIRECT_BATCH_SIZE)} failed: ${err.message}`);
-                }
-            }
-            logger.info(`[Producer] Direct processing: ${directProcessed}/${sourcesToCrawl.length} sources completed.`);
-        }
-
-        // ── 3. Periodic intelligence tasks ────────────────────────────────────
-
-        if (isIntelEnabled && cycleNumber % (intel.recalcIntervalCycles || 4) === 0) {
-            try {
-                const updated = await recalculatePriorities(env.DB);
-                logger.info(`[Intelligence] Priority recalculation: ${updated} sources updated`);
-            } catch (err) {
-                logger.warn(`[Intelligence] Priority recalc failed: ${err.message}`);
-            }
-        }
-
-        if (isIntelEnabled && cycleNumber % (intel.careerProbeIntervalCycles || 12) === 0) {
-            try {
-                const domains = await getPendingDomains(env.DB, intel.maxCareerProbes || 5);
-                if (domains.length > 0) {
-                    const registered = await probeDomainsForCareers(env.DB, domains, intel.maxCareerProbes || 5);
-                    logger.info(`[CareerDetector] Probed ${domains.length} domains, registered ${registered.length} career pages`);
-                    if (registered.length > 0) {
-                        await incrementDailyMetrics(env.DB, { new_sources_career: registered.length });
-                    }
-                }
-            } catch (err) {
-                logger.warn(`[CareerDetector] Career probing failed: ${err.message}`);
-            }
-        }
-
-        if (isIntelEnabled && config.searchExpansion?.enabled && cycleNumber % (intel.searchIntervalCycles || 24) === 0) {
-            try {
-                const knownUrls = new Set(allSources.map(s => s.url));
-                const { newAtsSources, newDomains } = await runSearchExpansion(
-                    env.DB,
-                    config.searchExpansion.queries || [],
-                    knownUrls,
-                    config.searchExpansion.maxSearchesPerCycle || 3,
-                    config.searchExpansion.maxDomainsPerSearch || 10
-                );
-                logger.info(`[SearchExpander] Expansion: ${newAtsSources} ATS sources, ${newDomains} domains queued`);
-                if (newAtsSources > 0 || newDomains > 0) {
-                    await incrementDailyMetrics(env.DB, { new_sources_search: newAtsSources, new_domains_queued: newDomains });
-                }
-            } catch (err) {
-                logger.warn(`[SearchExpander] Search expansion failed: ${err.message}`);
-            }
-        }
-
-        try {
-            await cleanupStaleJobs(env.DB, 30);
-        } catch (err) { logger.warn(`[Producer] Cleanup failed: ${err.message}`); }
-
-        // ── Daily Metrics: track cycle ─────────────────────────────────────
-        try {
-            await incrementDailyMetrics(env.DB, { cycles_completed: 1, worker_invocations: 1 });
-        } catch (err) { logger.error(`[Producer] Daily metrics update failed: ${err.message}`); }
-
-        // ── Daily Intelligence Report (trigger at midnight UTC cycle) ──────
-        const hourUTC = new Date().getUTCHours();
-        const minuteUTC = new Date().getUTCMinutes();
-        if (hourUTC === 0 && minuteUTC < 15) {
-            try {
-                // At midnight UTC, report on the PREVIOUS day's complete data
-                const yesterday = new Date(Date.now() - 86400_000).toISOString().split('T')[0];
-                const result = await sendDailyReport(env.DB, env, { reportDate: yesterday });
-                logger.info(`[DailyReport] Sent to: ${result.channels.join(', ') || 'none'}`);
-            } catch (err) {
-                logger.warn(`[DailyReport] Failed: ${err.message}`);
-            }
-        }
-
-        logger.info(`[Producer] Cycle #${cycleNumber} dispatch complete.`);
     },
 
+    /**
+     * Queue consumer router.
+     * Issue 7 fix: Wraps queueHandler in a global try-catch so any unhandled crash
+     * logs the queue name + stack trace and retries all messages to avoid message loss.
+     */
     async queue(batch, env, ctx) {
-        await queueHandler(batch, env);
+        try {
+            await queueHandler(batch, env);
+        } catch (err) {
+            logger.error(`[Queue] Unhandled error in queue="${batch.queue}": ${err.message}`, { stack: err.stack });
+            // Retry all messages so they are not lost on an unexpected crash
+            for (const msg of batch.messages) {
+                try { msg.retry(); } catch (_) { /* already acked */ }
+            }
+        }
     }
 };

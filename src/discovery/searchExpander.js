@@ -25,10 +25,10 @@ const DDG_FAILURE_KEY = 'search_expander:ddg_failures';
 const DDG_COOLDOWN_KEY = 'search_expander:ddg_cooldown';
 
 /** Consecutive DDG failures before entering cooldown. */
-const DDG_FAILURE_THRESHOLD = 3;
+const DDG_FAILURE_THRESHOLD = 5;
 
-/** Base cooldown in seconds (30 minutes), doubles per threshold breach. */
-const DDG_BASE_COOLDOWN_SECONDS = 30 * 60;
+/** Base cooldown in seconds (10 minutes), doubles per threshold breach. */
+const DDG_BASE_COOLDOWN_SECONDS = 10 * 60;
 
 /**
  * Run search-based expansion for a list of queries.
@@ -51,7 +51,7 @@ const DDG_BASE_COOLDOWN_SECONDS = 30 * 60;
  * @param {number} [maxDomainsPerSearch=10] - Max domains to extract per search.
  * @returns {Promise<{ newAtsSources: number, newDomains: number }>}
  */
-export async function runSearchExpansion(db, queries, knownSourceUrls, kv = null, maxSearches = 3, maxDomainsPerSearch = 10) {
+export async function runSearchExpansion(db, queries, knownSourceUrls, kv = null, maxSearches = 8, maxDomainsPerSearch = 20) {
     let totalNewAts = 0;
     let totalNewDomains = 0;
 

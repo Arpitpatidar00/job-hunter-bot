@@ -30,6 +30,10 @@ const CAREER_PATHS = [
     '/openings',
     '/hiring',
     '/work',
+    '/about/careers',
+    '/workwithus',
+    '/apply-now',
+    '/join-our-team',
 ];
 
 /**
@@ -40,7 +44,7 @@ const CAREER_PATHS = [
  * @param {number} [maxProbes=5] - Max domains to probe per cycle (rate limit).
  * @returns {Promise<object[]>} Successfully registered career page sources.
  */
-export async function probeDomainsForCareers(db, domains, maxProbes = 5) {
+export async function probeDomainsForCareers(db, domains, maxProbes = 15) {
     const registered = [];
     let probed = 0;
 

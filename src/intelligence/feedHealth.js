@@ -15,13 +15,13 @@
 import logger from '../core/logger.js';
 
 /** Consecutive failures before circuit opens. */
-const OPEN_THRESHOLD = 5;
+const OPEN_THRESHOLD = 10;
 
-/** Base cooldown in seconds (15 minutes). Scales with failure count. */
-const BASE_COOLDOWN_SECONDS = 15 * 60;
+/** Base cooldown in seconds (5 minutes). Scales with failure count. */
+const BASE_COOLDOWN_SECONDS = 5 * 60;
 
-/** Maximum cooldown in seconds (4 hours). */
-const MAX_COOLDOWN_SECONDS = 4 * 60 * 60;
+/** Maximum cooldown in seconds (1 hour). */
+const MAX_COOLDOWN_SECONDS = 60 * 60;
 
 /** KV TTL for health records — 30 days. */
 const HEALTH_TTL = 30 * 24 * 60 * 60;

@@ -12,28 +12,28 @@
  * Rate-limited to avoid hammering unknown domains.
  */
 
-import { fetchWithTimeout, rateLimitDomain } from '../connectors/base.js';
-import { registerDiscoveredSource } from '../db/index.js';
-import logger from '../core/logger.js';
+import { fetchWithTimeout, rateLimitDomain } from "../connectors/base.js";
+import { registerDiscoveredSource } from "../db/index.js";
+import logger from "../core/logger.js";
 
 /** Common career page path suffixes to probe. */
 const CAREER_PATHS = [
-    '/careers',
-    '/jobs',
-    '/work-with-us',
-    '/open-positions',
-    '/join-us',
-    '/career',
-    '/job-openings',
-    '/join',
-    '/team',
-    '/openings',
-    '/hiring',
-    '/work',
-    '/about/careers',
-    '/workwithus',
-    '/apply-now',
-    '/join-our-team',
+  "/careers",
+  "/jobs",
+  "/work-with-us",
+  "/open-positions",
+  "/join-us",
+  "/career",
+  "/job-openings",
+  "/join",
+  "/team",
+  "/openings",
+  "/hiring",
+  "/work",
+  "/about/careers",
+  "/workwithus",
+  "/apply-now",
+  "/join-our-team",
 ];
 
 /**
@@ -45,51 +45,53 @@ const CAREER_PATHS = [
  * @returns {Promise<object[]>} Successfully registered career page sources.
  */
 export async function probeDomainsForCareers(db, domains, maxProbes = 15) {
-    const registered = [];
-    let probed = 0;
+  const registered = [];
+  let probed = 0;
 
-    for (const domain of domains) {
-        if (probed >= maxProbes) break;
+  for (const domain of domains) {
+    if (probed >= maxProbes) break;
 
-        try {
-            const result = await probeSingleDomain(domain);
-            probed++;
+    try {
+      const result = await probeSingleDomain(domain);
+      probed++;
 
-            if (result) {
-                // Register as a career_page source
-                const source = {
-                    url: result.careerUrl,
-                    type: 'career_page',
-                    name: domainToName(domain),
-                    enabled: true,
-                    discovery_origin: 'career-probe',
-                };
+      if (result) {
+        // Register as a career_page source
+        const source = {
+          url: result.careerUrl,
+          type: "career_page",
+          name: domainToName(domain),
+          enabled: true,
+          discovery_origin: "career-probe",
+        };
 
-                await registerDiscoveredSource(db, source);
-                registered.push(source);
+        await registerDiscoveredSource(db, source);
+        registered.push(source);
 
-                // Update domain registry
-                await updateDomainStatus(db, domain, {
-                    status: 'active',
-                    careerUrl: result.careerUrl,
-                    hasJsonLd: result.hasJsonLd,
-                    hasJobLinks: result.hasJobLinks,
-                    jobCount: result.jobCount,
-                });
+        // Update domain registry
+        await updateDomainStatus(db, domain, {
+          status: "active",
+          careerUrl: result.careerUrl,
+          hasJsonLd: result.hasJsonLd,
+          hasJobLinks: result.hasJobLinks,
+          jobCount: result.jobCount,
+        });
 
-                logger.info(`[CareerDetector] ✅ Found career page: ${domain} → ${result.careerUrl} (${result.jobCount} jobs)`);
-            } else {
-                // Mark domain as dead (no career page found)
-                await updateDomainStatus(db, domain, { status: 'dead' });
-                logger.info(`[CareerDetector] ❌ No career page found: ${domain}`);
-            }
-        } catch (err) {
-            logger.warn(`[CareerDetector] Error probing ${domain}: ${err.message}`);
-            await updateDomainStatus(db, domain, { status: 'dead' });
-        }
+        logger.info(
+          `[CareerDetector] ✅ Found career page: ${domain} → ${result.careerUrl} (${result.jobCount} jobs)`,
+        );
+      } else {
+        // Mark domain as dead (no career page found)
+        await updateDomainStatus(db, domain, { status: "dead" });
+        logger.info(`[CareerDetector] ❌ No career page found: ${domain}`);
+      }
+    } catch (err) {
+      logger.warn(`[CareerDetector] Error probing ${domain}: ${err.message}`);
+      await updateDomainStatus(db, domain, { status: "dead" });
     }
+  }
 
-    return registered;
+  return registered;
 }
 
 /**
@@ -99,45 +101,53 @@ export async function probeDomainsForCareers(db, domains, maxProbes = 15) {
  * @returns {Promise<{careerUrl: string, hasJsonLd: boolean, hasJobLinks: boolean, jobCount: number} | null>}
  */
 async function probeSingleDomain(domain) {
-    for (const path of CAREER_PATHS) {
-        const url = `https://${domain}${path}`;
+  for (const path of CAREER_PATHS) {
+    const url = `https://${domain}${path}`;
 
-        try {
-            await rateLimitDomain(url, 3000);
+    try {
+      await rateLimitDomain(url, 3000);
 
-            const res = await fetchWithTimeout(url, {
-                headers: {
-                    'Accept': 'text/html',
-                    'User-Agent': 'JobHunterBot/5.1 (+https://github.com/job-hunter-bot)',
-                },
-                redirect: 'follow',
-            }, 10_000);
+      const res = await fetchWithTimeout(
+        url,
+        {
+          headers: {
+            Accept: "text/html",
+            "User-Agent":
+              "JobHunterBot/5.1 (+https://github.com/job-hunter-bot)",
+          },
+          redirect: "follow",
+        },
+        10_000,
+      );
 
-            if (!res.ok) continue;
+      if (!res.ok) continue;
 
-            const html = await res.text();
+      const html = await res.text();
 
-            // Check for JobPosting JSON-LD
-            const hasJsonLd = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>[\s\S]*?JobPosting[\s\S]*?<\/script>/i.test(html);
+      // Check for JobPosting JSON-LD
+      const hasJsonLd =
+        /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>[\s\S]*?JobPosting[\s\S]*?<\/script>/i.test(
+          html,
+        );
 
-            // Check for job-like links
-            const jobLinkCount = countJobLinks(html);
+      // Check for job-like links
+      const jobLinkCount = countJobLinks(html);
 
-            if (hasJsonLd || jobLinkCount >= 2) {
-                return {
-                    careerUrl: res.url || url, // Follow redirects
-                    hasJsonLd,
-                    hasJobLinks: jobLinkCount > 0,
-                    jobCount: hasJsonLd ? countJsonLdPostings(html) : jobLinkCount,
-                };
-            }
-        } catch {
-            // Timeout or network error, try next path
-            continue;
-        }
+      if (hasJsonLd || jobLinkCount >= 2) {
+        return {
+          careerUrl: res.url || url, // Follow redirects
+          hasJsonLd,
+          hasJobLinks: jobLinkCount > 0,
+          jobCount: hasJsonLd ? countJsonLdPostings(html) : jobLinkCount,
+        };
+      }
+    } catch {
+      // Timeout or network error, try next path
+      continue;
     }
+  }
 
-    return null; // No career page found
+  return null; // No career page found
 }
 
 /**
@@ -146,22 +156,22 @@ async function probeSingleDomain(domain) {
  * @returns {number}
  */
 function countJobLinks(html) {
-    const patterns = [
-        /href\s*=\s*["'][^"']*\/jobs?\//gi,
-        /href\s*=\s*["'][^"']*\/careers?\//gi,
-        /href\s*=\s*["'][^"']*\/positions?\//gi,
-        /href\s*=\s*["'][^"']*\/openings?\//gi,
-        /href\s*=\s*["'][^"']*\/apply\//gi,
-        /href\s*=\s*["'][^"']*job[_-]?id/gi,
-    ];
+  const patterns = [
+    /href\s*=\s*["'][^"']*\/jobs?\//gi,
+    /href\s*=\s*["'][^"']*\/careers?\//gi,
+    /href\s*=\s*["'][^"']*\/positions?\//gi,
+    /href\s*=\s*["'][^"']*\/openings?\//gi,
+    /href\s*=\s*["'][^"']*\/apply\//gi,
+    /href\s*=\s*["'][^"']*job[_-]?id/gi,
+  ];
 
-    let count = 0;
-    for (const p of patterns) {
-        const matches = html.match(p);
-        if (matches) count += matches.length;
-    }
+  let count = 0;
+  for (const p of patterns) {
+    const matches = html.match(p);
+    if (matches) count += matches.length;
+  }
 
-    return count;
+  return count;
 }
 
 /**
@@ -170,8 +180,8 @@ function countJobLinks(html) {
  * @returns {number}
  */
 function countJsonLdPostings(html) {
-    const matches = html.match(/["']@type["']\s*:\s*["']JobPosting["']/gi);
-    return matches ? matches.length : 0;
+  const matches = html.match(/["']@type["']\s*:\s*["']JobPosting["']/gi);
+  return matches ? matches.length : 0;
 }
 
 // ── Domain helpers ──────────────────────────────────────────────────────────
@@ -182,11 +192,11 @@ function countJsonLdPostings(html) {
  * @returns {string}
  */
 function domainToName(domain) {
-    return domain
-        .replace(/^www\./, '')
-        .split('.')[0]
-        .replace(/[-_]/g, ' ')
-        .replace(/\b\w/g, c => c.toUpperCase());
+  return domain
+    .replace(/^www\./, "")
+    .split(".")[0]
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /**
@@ -197,23 +207,28 @@ function domainToName(domain) {
  * @param {object} update
  */
 async function updateDomainStatus(db, domain, update) {
-    try {
-        await db.prepare(
-            `UPDATE domain_registry
+  try {
+    await db
+      .prepare(
+        `UPDATE domain_registry
              SET status = ?, career_url = ?, has_json_ld = ?, has_job_links = ?,
                  job_count = ?, last_probed_at = CURRENT_TIMESTAMP
-             WHERE domain = ?`
-        ).bind(
-            update.status || 'probed',
-            update.careerUrl || null,
-            update.hasJsonLd ? 1 : 0,
-            update.hasJobLinks ? 1 : 0,
-            update.jobCount || 0,
-            domain
-        ).run();
-    } catch (err) {
-        logger.warn(`[CareerDetector] Failed to update domain ${domain}: ${err.message}`);
-    }
+             WHERE domain = ?`,
+      )
+      .bind(
+        update.status || "probed",
+        update.careerUrl || null,
+        update.hasJsonLd ? 1 : 0,
+        update.hasJobLinks ? 1 : 0,
+        update.jobCount || 0,
+        domain,
+      )
+      .run();
+  } catch (err) {
+    logger.warn(
+      `[CareerDetector] Failed to update domain ${domain}: ${err.message}`,
+    );
+  }
 }
 
 /**
@@ -224,14 +239,52 @@ async function updateDomainStatus(db, domain, update) {
  * @param {string} sourceJobUrl - The job URL that led to discovering this domain.
  */
 export async function registerDomain(db, domain, sourceJobUrl) {
-    try {
-        await db.prepare(
-            `INSERT OR IGNORE INTO domain_registry (domain, source_job_url)
-             VALUES (?, ?)`
-        ).bind(domain, sourceJobUrl).run();
-    } catch (err) {
-        logger.warn(`[CareerDetector] Failed to register domain ${domain}: ${err.message}`);
+  try {
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO domain_registry (domain, source_job_url)
+             VALUES (?, ?)`,
+      )
+      .bind(domain, sourceJobUrl)
+      .run();
+  } catch (err) {
+    logger.warn(
+      `[CareerDetector] Failed to register domain ${domain}: ${err.message}`,
+    );
+  }
+}
+
+/**
+ * Register multiple new domains for probing in a single batch.
+ *
+ * @param {D1Database} db
+ * @param {Array<{domain: string, sourceJobUrl: string}>} domains
+ */
+export async function batchRegisterDomains(db, domains) {
+  if (!domains || domains.length === 0) return;
+
+  try {
+    const stmts = domains.map((d) =>
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO domain_registry (domain, source_job_url) VALUES (?, ?)`,
+        )
+        .bind(d.domain, d.sourceJobUrl),
+    );
+
+    // Execute in batches of 40 (inside D1 batch limits)
+    for (let i = 0; i < stmts.length; i += 40) {
+      await db.batch(stmts.slice(i, i + 40));
     }
+  } catch (err) {
+    logger.warn(
+      `[CareerDetector] Failed to batch register domains: ${err.message}`,
+    );
+    // Fall back to individual registration
+    for (const d of domains) {
+      await registerDomain(db, d.domain, d.sourceJobUrl);
+    }
+  }
 }
 
 /**
@@ -242,13 +295,18 @@ export async function registerDomain(db, domain, sourceJobUrl) {
  * @returns {Promise<string[]>}
  */
 export async function getPendingDomains(db, limit = 10) {
-    try {
-        const result = await db.prepare(
-            `SELECT domain FROM domain_registry WHERE status = 'pending' LIMIT ?`
-        ).bind(limit).all();
-        return result.success ? result.results.map(r => r.domain) : [];
-    } catch (err) {
-        logger.warn(`[CareerDetector] Failed to get pending domains: ${err.message}`);
-        return [];
-    }
+  try {
+    const result = await db
+      .prepare(
+        `SELECT domain FROM domain_registry WHERE status = 'pending' LIMIT ?`,
+      )
+      .bind(limit)
+      .all();
+    return result.success ? result.results.map((r) => r.domain) : [];
+  } catch (err) {
+    logger.warn(
+      `[CareerDetector] Failed to get pending domains: ${err.message}`,
+    );
+    return [];
+  }
 }

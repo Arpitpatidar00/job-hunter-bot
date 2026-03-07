@@ -90,25 +90,34 @@ export async function runAllConnectors(config, kv = null) {
     );
 
     try {
-      const results = await connector(sources, config, kv);
+      const CHUNK_SIZE = 10;
+      for (let i = 0; i < sources.length; i += CHUNK_SIZE) {
+        const chunk = sources.slice(i, i + CHUNK_SIZE);
+        const results = await connector(chunk, config, kv);
 
-      for (const result of results) {
-        feedStats.push({
-          type,
-          url: result.feedUrl,
-          name: result.sourceName,
-          count: result.items.length,
-          durationMs: result.durationMs || 0,
-          success: !result.error,
-          error: result.error || null,
-        });
+        for (const result of results) {
+          feedStats.push({
+            type,
+            url: result.feedUrl,
+            name: result.sourceName,
+            count: result.items.length,
+            durationMs: result.durationMs || 0,
+            success: !result.error,
+            error: result.error || null,
+          });
 
-        if (result.error) {
-          totalErrors++;
-        } else {
-          for (const job of result.items) {
-            jobs.push(job);
+          if (result.error) {
+            totalErrors++;
+          } else {
+            for (const job of result.items) {
+              jobs.push(job);
+            }
           }
+        }
+
+        // Delay between chunks to prevent 429s and burst fetch limits
+        if (i + CHUNK_SIZE < sources.length) {
+          await new Promise((r) => setTimeout(r, 1000));
         }
       }
     } catch (err) {

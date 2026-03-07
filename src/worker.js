@@ -19,7 +19,7 @@ import {
   scoreJob,
   isNewJob,
   MINIMUM_ALERT_SCORE,
-} from "./scoring/relevance.js";
+} from "./scoring/relevance-v4.js";
 import { sendAlert } from "./notifications/notifications.js";
 
 // D1 Database Layer
@@ -29,10 +29,13 @@ import {
   getActiveProfiles,
   hasSentAlert,
   markAlertSent,
+  getSentAlertsForJobs,
+  batchMarkAlertSent,
   recordTermFrequencies,
   getGlobalTermFrequencies,
   updateSourceStats,
   registerDiscoveredSource,
+  batchRegisterDiscoveredSources,
   getSourceMetrics,
   getEnabledSources,
   cleanupStaleJobs,
@@ -42,6 +45,7 @@ import {
 import { detectAtsSourcesWithDomains } from "./discovery/sourceDiscovery.js";
 import {
   registerDomain,
+  batchRegisterDomains,
   getPendingDomains,
   probeDomainsForCareers,
 } from "./discovery/careerDetector.js";
@@ -74,21 +78,46 @@ import {
   getPreferenceWeights,
 } from "./scoring/feedback.js";
 import { runGrowthEngineCycle } from "./intelligence/growthEngine.js";
+import { retrainThresholds } from "./intelligence/calibration.js";
 
 // AI
+import { generateEmbedding, cosineSimilarity } from "./notifications/ai.js";
+
 import {
-  generateEmbedding,
-  cosineSimilarity,
+  chunkTexts,
+  embedChunks,
+  retrieveRelevant,
   resetAiCallCount,
-} from "./notifications/ai.js";
+} from "./notifications/ai-v4.js";
 
 // ── JSON Response Helper ─────────────────────────────────────────────────────
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(data, status = 200, additionalHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...additionalHeaders },
   });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function hasBasicKeywordMatch(job, config) {
+  if (job.matchedTerms && job.matchedTerms.length > 0) return true;
+
+  const terms = [
+    ...(config.searchRules?.mustMatch || []),
+    ...(config.searchRules?.niceToHave || []),
+  ];
+  if (terms.length === 0) return true; // if no rules configured, pass
+
+  const text =
+    `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`.toLowerCase();
+  for (const term of terms) {
+    if (text.includes(term.toLowerCase())) return true;
+  }
+  return false;
 }
 
 // ── Retry Helper (Issue 3) ────────────────────────────────────────────────────
@@ -335,6 +364,7 @@ async function processFeeds(messages, env) {
   let queueMsgs = 0;
   let jobQueueSuccess = false;
   try {
+    const messages = [];
     for (let i = 0; i < newJobs.length; i += JOB_CHUNK_SIZE) {
       const slimChunk = newJobs.slice(i, i + JOB_CHUNK_SIZE).map(slimJob);
       const payload = { jobs: slimChunk };
@@ -347,10 +377,18 @@ async function processFeeds(messages, env) {
         );
         continue;
       }
-
-      await withRetry(() => env.JOB_QUEUE.send(payload));
+      messages.push({ body: payload });
     }
-    queueMsgs = Math.ceil(newJobs.length / JOB_CHUNK_SIZE);
+
+    // Cloudflare Queues support up to 100 messages per sendBatch
+    for (let i = 0; i < messages.length; i += 100) {
+      await withRetry(() =>
+        env.JOB_QUEUE.sendBatch(messages.slice(i, i + 100)),
+      );
+      await sleep(200); // Pace queue sends
+    }
+
+    queueMsgs = messages.length;
     if (newJobs.length > 0) {
       logger.info(
         `[Fetcher] Sent ${newJobs.length} jobs in ${queueMsgs} queue messages`,
@@ -359,7 +397,7 @@ async function processFeeds(messages, env) {
     jobQueueSuccess = true;
   } catch (err) {
     logger.error(
-      `[Fetcher] JOB_QUEUE send failed after retries: ${err.message}. Falling back to direct evaluation.`,
+      `[Fetcher] JOB_QUEUE sendBatch failed after retries: ${err.message}. Falling back to direct evaluation.`,
     );
   }
 
@@ -422,8 +460,8 @@ async function processFeeds(messages, env) {
     const { sources: newSources, domains: discoveredDomains } =
       detectAtsSourcesWithDomains(urlsForAtsDetection, knownUrls);
 
-    for (const src of newSources) {
-      await registerDiscoveredSource(env.DB, src);
+    if (newSources.length > 0) {
+      await batchRegisterDiscoveredSources(env.DB, newSources);
     }
     newAts = newSources.length;
     if (newAts > 0)
@@ -443,8 +481,13 @@ async function processFeeds(messages, env) {
       })
       .slice(0, 30);
 
-    for (const { domain, sourceUrl } of companyDomains) {
-      await registerDomain(env.DB, domain, sourceUrl);
+    const domainsToRegister = companyDomains.map((d) => ({
+      domain: d.domain,
+      sourceJobUrl: d.sourceUrl,
+    }));
+
+    if (domainsToRegister.length > 0) {
+      await batchRegisterDomains(env.DB, domainsToRegister);
     }
     newDomains = companyDomains.length;
     if (newDomains > 0)
@@ -544,7 +587,26 @@ async function evaluateJobs(messages, env) {
     // Support both batched format { jobs: [...] } and legacy single job format
     const msgJobs = msg.body.jobs || [msg.body];
 
+    // Filter new jobs to evaluate
+    const newJobsToEvaluate = [];
     for (const job of msgJobs) {
+      if (!isNewJob(job, config.timeWindowHours)) continue;
+      newJobsToEvaluate.push(job);
+    }
+
+    if (newJobsToEvaluate.length === 0) {
+      msg.ack();
+      continue;
+    }
+
+    // Issue 1: Pre-fetch all sent alerts for the batch in one D1 subrequest
+    const jobIds = newJobsToEvaluate.map((j) => j.id);
+    const sentAlertsSet = await getSentAlertsForJobs(env.DB, jobIds);
+    const newAlertsSent = [];
+
+    for (let i = 0; i < newJobsToEvaluate.length; i++) {
+      const job = newJobsToEvaluate[i];
+
       // Wall-time guard: stop before Worker timeout
       if (Date.now() - EVAL_START > WALL_TIME_LIMIT_MS) {
         logger.warn(
@@ -553,20 +615,61 @@ async function evaluateJobs(messages, env) {
         break;
       }
 
-      if (!isNewJob(job, config.timeWindowHours)) {
+      jobsEvaluated++;
+
+      // Issue 6: Ultra-fast keyword pre-filter before invoking the AI binding.
+      if (!hasBasicKeywordMatch(job, config)) {
         continue;
       }
 
-      jobsEvaluated++;
+      // v4: Chunk the job text and get embeddings
+      const jobTextForAi = `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`;
+      const chunks = chunkTexts(jobTextForAi, 200, 40);
 
-      const jobTextForAi = `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""}`;
-      const jobVector = await generateEmbedding(env.AI, jobTextForAi);
+      const chunkVecs = await embedChunks(
+        env.AI,
+        env.SEEN_JOBS,
+        job.id,
+        chunks,
+      );
       aiCallsCount++;
 
-      const semanticSim = cosineSimilarity(jobVector, profileVector);
+      // v4: Insert chunk vectors into D1
+      try {
+        const insertStmt = env.DB.prepare(
+          "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
+        );
+        const batch = chunks.map((chunk, idx) =>
+          insertStmt.bind(
+            job.id,
+            chunk,
+            JSON.stringify(chunkVecs[idx] || []),
+            "unknown",
+          ),
+        );
+        if (batch.length > 0) await env.DB.batch(batch);
+      } catch (e) {
+        logger.warn(`[Evaluator] Failed inserting chunks to D1: ${e.message}`);
+      }
+
+      // v4: RAG Retrieval
+      const ragMatches = await retrieveRelevant(
+        env.DB,
+        profileVector,
+        job.id,
+        5,
+      );
+
+      const trajectoryFit = 0.5; // v4 stub
 
       // Score once using pre-fetched IDF data (no per-job D1 query)
-      let scoreResult = scoreJob(job, config, globalIdfData, semanticSim);
+      let scoreResult = scoreJob(
+        job,
+        config,
+        globalIdfData,
+        ragMatches,
+        trajectoryFit,
+      );
 
       if (scoreResult.excluded) continue;
 
@@ -589,7 +692,7 @@ async function evaluateJobs(messages, env) {
         const effectiveThreshold = Math.max(threshold, MINIMUM_ALERT_SCORE);
         if (scoreResult.score < effectiveThreshold) continue;
 
-        if (await hasSentAlert(env.DB, job.id, profile.id)) {
+        if (sentAlertsSet.has(`${job.id}:${profile.id}`)) {
           continue;
         }
 
@@ -625,11 +728,16 @@ async function evaluateJobs(messages, env) {
           }
         }
 
-        await markAlertSent(env.DB, job.id, profile.id);
+        newAlertsSent.push({ jobId: job.id, profileId: profile.id });
+        sentAlertsSet.add(`${job.id}:${profile.id}`); // in-memory update
         alertsQueued++;
         scoreSum += scoreResult.score;
         scoreMax = Math.max(scoreMax, scoreResult.score);
       }
+    }
+
+    if (newAlertsSent.length > 0) {
+      await batchMarkAlertSent(env.DB, newAlertsSent);
     }
 
     msg.ack();
@@ -766,6 +874,7 @@ async function _scheduledImpl(event, env, ctx) {
       await withRetry(() =>
         env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100)),
       );
+      await sleep(200); // Pace queue sends
     }
     logger.info(
       `[Producer] Successfully queued ${sourcesToCrawl.length} sources`,
@@ -824,6 +933,11 @@ async function _scheduledImpl(event, env, ctx) {
     } catch (err) {
       logger.warn(`[Intelligence] Priority recalc failed: ${err.message}`);
     }
+  }
+
+  // v4 Calibration Loop
+  if (isIntelEnabled && cycleNumber % 24 === 0) {
+    await retrainThresholds(env.DB, env.SEEN_JOBS);
   }
 
   if (
@@ -1001,12 +1115,16 @@ export default {
     if (url.pathname === "/metrics") {
       try {
         const metrics = await getSourceMetrics(env.DB);
-        return jsonResponse({
-          status: "ok",
-          version: "5.1.0",
-          timestamp: new Date().toISOString(),
-          ...metrics,
-        });
+        return jsonResponse(
+          {
+            status: "ok",
+            version: "5.1.0",
+            timestamp: new Date().toISOString(),
+            ...metrics,
+          },
+          200,
+          { "Cache-Control": "public, max-age=3600" },
+        );
       } catch (err) {
         return jsonResponse({ status: "error", message: err.message }, 500);
       }
@@ -1028,7 +1146,10 @@ export default {
           });
         }
         return new Response(report, {
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "public, max-age=3600",
+          },
         });
       } catch (err) {
         return jsonResponse({ status: "error", message: err.message }, 500);

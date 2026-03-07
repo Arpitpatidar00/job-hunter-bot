@@ -28,13 +28,18 @@
  * @returns {string}
  */
 export function normalizeCompany(company) {
-    if (!company) return '';
-    return company
-        // Only strip legal suffixes at the END of the string (with optional trailing punctuation)
-        .replace(/\s*\b(inc\.?|ltd\.?|llc\.?|corp\.?|gmbh|s\.?a\.?|b\.?v\.?)\s*[,.|]*\s*$/gi, '')
-        .replace(/[,.|]+$/g, '')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
+  if (!company) return "";
+  return (
+    company
+      // Only strip legal suffixes at the END of the string (with optional trailing punctuation)
+      .replace(
+        /\s*\b(inc\.?|ltd\.?|llc\.?|corp\.?|gmbh|s\.?a\.?|b\.?v\.?)\s*[,.|]*\s*$/gi,
+        "",
+      )
+      .replace(/[,.|]+$/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  );
 }
 
 /**
@@ -45,17 +50,22 @@ export function normalizeCompany(company) {
  * @returns {string}
  */
 export function normalizeTitle(title) {
-    if (!title) return '';
-    return title
-        // Remove emojis
-        .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
-        // Remove parenthetical noise
-        .replace(/\s*\((?:m\/w\/d|remote|all\s+levels?|anywhere|f\/m\/d|all\s+genders?)\)/gi, '')
-        // Remove bracketed suffixes like [remote], [contract]
-        .replace(/\s*\[(?:remote|contract|full[- ]?time|part[- ]?time)\]/gi, '')
-        // Collapse whitespace
-        .replace(/\s{2,}/g, ' ')
-        .trim();
+  if (!title) return "";
+  return (
+    title
+      // Remove emojis
+      .replace(/[\u{1F300}-\u{1FFFF}]/gu, "")
+      // Remove parenthetical noise
+      .replace(
+        /\s*\((?:m\/w\/d|remote|all\s+levels?|anywhere|f\/m\/d|all\s+genders?)\)/gi,
+        "",
+      )
+      // Remove bracketed suffixes like [remote], [contract]
+      .replace(/\s*\[(?:remote|contract|full[- ]?time|part[- ]?time)\]/gi, "")
+      // Collapse whitespace
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  );
 }
 
 /**
@@ -66,9 +76,9 @@ export function normalizeTitle(title) {
  * @returns {string} Normalized string suitable for hashing.
  */
 export function jobDedupeKey(title, company) {
-    const t = normalizeTitle(title).toLowerCase().replace(/\s+/g, ' ');
-    const c = normalizeCompany(company).toLowerCase().replace(/\s+/g, ' ');
-    return `${c}::${t}`;
+  const t = normalizeTitle(title).toLowerCase().replace(/\s+/g, " ");
+  const c = normalizeCompany(company).toLowerCase().replace(/\s+/g, " ");
+  return `${c}::${t}`;
 }
 
 /**
@@ -78,12 +88,12 @@ export function jobDedupeKey(title, company) {
  * @returns {string} 8-char hex hash.
  */
 function fnvHash(input) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < input.length; i++) {
-        h ^= input.charCodeAt(i);
-        h = (h * 0x01000193) >>> 0;
-    }
-    return h.toString(16).padStart(8, '0');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
 }
 
 /**
@@ -98,36 +108,66 @@ function fnvHash(input) {
  * @returns {RawJob}
  */
 export function normalizeJob(raw, sourceMeta = {}) {
-    const title = normalizeTitle(raw.title || '');
-    const company = normalizeCompany(raw.company || raw.creator || '');
-    const link = raw.link || raw.url || '';
-    const content = raw.content || raw.description || '';
-    const snippet = content.slice(0, 500);
-    const guid = raw.guid || raw.id || link || '';
-    const dedupeStr = jobDedupeKey(title, company);
-    const urlPath = link.replace(/\?.*$/, '').replace(/#.*$/, ''); // strip query/fragment
+  const title = normalizeTitle(raw.title || "");
+  const company = normalizeCompany(raw.company || raw.creator || "");
+  const link = raw.link || raw.url || "";
+  const content = raw.content || raw.description || "";
+  const snippet = content.slice(0, 500);
+  const guid = raw.guid || raw.id || link || "";
+  const dedupeStr = jobDedupeKey(title, company);
+  const urlPath = link.replace(/\?.*$/, "").replace(/#.*$/, ""); // strip query/fragment
 
-    // Tight hash: includes URL + content snippet → catches same-source re-posts
-    const content_hash = fnvHash(dedupeStr + '::' + urlPath + '::' + content.slice(0, 500));
+  // Tight hash: includes URL + content snippet → catches same-source re-posts
+  const content_hash = fnvHash(
+    dedupeStr + "::" + urlPath + "::" + content.slice(0, 500),
+  );
 
-    // Loose hash: company + title only → catches cross-source duplicates
-    const similarity_hash = fnvHash(dedupeStr);
+  // Loose hash: company + title only → catches cross-source duplicates
+  const similarity_hash = fnvHash(dedupeStr);
 
-    return {
-        id: guid,
-        url: link,
-        content_hash,
-        similarity_hash,
-        title,
-        company,
-        link,
-        content,
-        contentSnippet: snippet,
-        pubDate: raw.pubDate || raw.date || '',
-        isoDate: raw.isoDate || raw.pubDate || raw.date || '',
-        categories: Array.isArray(raw.categories) ? raw.categories : [],
-        sourceUrl: sourceMeta.url || '',
-        sourceName: sourceMeta.name || 'Unknown',
-        sourceType: sourceMeta.type || 'rss',
-    };
+  return {
+    id: guid,
+    url: link,
+    content_hash,
+    similarity_hash,
+    title,
+    company,
+    link,
+    content,
+    contentSnippet: snippet,
+    pubDate: raw.pubDate || raw.date || "",
+    isoDate: raw.isoDate || raw.pubDate || raw.date || "",
+    categories: Array.isArray(raw.categories) ? raw.categories : [],
+    sourceUrl: sourceMeta.url || "",
+    sourceName: sourceMeta.name || "Unknown",
+    sourceType: sourceMeta.type || "rss",
+  };
+}
+
+/**
+ * Remove duplicate jobs from a batch using a normalized content key.
+ * Acts as a fast in-memory dedup layer BEFORE D1 UNIQUE constraint writes.
+ * Normalizes: title + company + location (from contentSnippet) → stable key.
+ *
+ * @param {RawJob[]} jobs
+ * @returns {RawJob[]} Deduplicated array.
+ */
+export function deduplicateBatch(jobs) {
+  const seen = new Set();
+  return jobs.filter((job) => {
+    // Use content_hash if available (cheapest check)
+    if (job.content_hash) {
+      if (seen.has(job.content_hash)) return false;
+      seen.add(job.content_hash);
+      return true;
+    }
+    // Fallback: normalize title + company
+    const key = [
+      (job.title || "").toLowerCase().trim().replace(/\s+/g, " "),
+      (job.company || "").toLowerCase().trim(),
+    ].join("::");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

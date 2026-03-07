@@ -7,50 +7,61 @@
  * across RSS, Greenhouse, Lever, Ashby, Workable, etc.
  */
 
-import logger from '../core/logger.js';
+import logger from "../core/logger.js";
 
 // ── Fetch with Timeout ───────────────────────────────────────────────────────
 
 /** Default request timeout in ms. */
 const DEFAULT_TIMEOUT_MS = 10_000;
 
-/**
- * Fetch a URL with an automatic AbortController timeout.
- * Validates URL before fetching.
- *
- * @param {string} url
- * @param {RequestInit} [options={}]
- * @param {number} [timeoutMs=10000]
- * @returns {Promise<Response>}
- */
-export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    // Validate URL
-    try {
-        const parsed = new URL(url);
-        if (!parsed.protocol.startsWith('http')) {
-            throw new Error(`Invalid URL protocol: ${parsed.protocol}`);
-        }
-    } catch (err) {
-        throw new Error(`Invalid URL "${url}": ${err.message}`);
+export async function fetchWithTimeout(
+  url,
+  options = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxRetries = 2,
+) {
+  // Validate URL
+  try {
+    const parsed = new URL(url);
+    if (!parsed.protocol.startsWith("http")) {
+      throw new Error(`Invalid URL protocol: ${parsed.protocol}`);
     }
+  } catch (err) {
+    throw new Error(`Invalid URL "${url}": ${err.message}`);
+  }
 
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        const res = await fetch(url, {
-            ...options,
-            signal: controller.signal,
-            headers: {
-                'User-Agent': 'JobHunterBot/5.1 (+https://github.com/job-hunter-bot)',
-                'Accept': 'application/json',
-                ...options.headers,
-            },
-        });
-        return res;
-    } finally {
-        clearTimeout(timer);
+      const res = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "JobHunterBot/5.1 (+https://github.com/job-hunter-bot)",
+          Accept: "application/json",
+          ...options.headers,
+        },
+      });
+      clearTimeout(timer);
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err;
+      if (attempt < maxRetries) {
+        const delay = 1000 * Math.pow(2, attempt) + Math.random() * 500;
+        // Avoid logging full logger.warn since logger is not imported everywhere?
+        // Ah, logger is imported at the top of base.js.
+        logger.warn(
+          `[Fetch] Attempt ${attempt + 1} failed for ${url} (${err.message}). Retrying in ${Math.round(delay)}ms...`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
+  }
+  throw lastErr;
 }
 
 // ── Rate Limiting per Domain ─────────────────────────────────────────────────
@@ -68,23 +79,26 @@ const MIN_DOMAIN_INTERVAL_MS = 2000;
  * @param {string} url - The URL being fetched (domain extracted automatically).
  * @param {number} [minIntervalMs=2000]
  */
-export async function rateLimitDomain(url, minIntervalMs = MIN_DOMAIN_INTERVAL_MS) {
-    let domain;
-    try {
-        domain = new URL(url).hostname;
-    } catch {
-        return; // invalid URL, skip rate limiting
-    }
+export async function rateLimitDomain(
+  url,
+  minIntervalMs = MIN_DOMAIN_INTERVAL_MS,
+) {
+  let domain;
+  try {
+    domain = new URL(url).hostname;
+  } catch {
+    return; // invalid URL, skip rate limiting
+  }
 
-    const lastTs = _domainTimestamps.get(domain) || 0;
-    const elapsed = Date.now() - lastTs;
+  const lastTs = _domainTimestamps.get(domain) || 0;
+  const elapsed = Date.now() - lastTs;
 
-    if (elapsed < minIntervalMs) {
-        const waitMs = minIntervalMs - elapsed;
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-    }
+  if (elapsed < minIntervalMs) {
+    const waitMs = minIntervalMs - elapsed;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
 
-    _domainTimestamps.set(domain, Date.now());
+  _domainTimestamps.set(domain, Date.now());
 }
 
 // ── Source Validation ────────────────────────────────────────────────────────
@@ -97,15 +111,17 @@ export async function rateLimitDomain(url, minIntervalMs = MIN_DOMAIN_INTERVAL_M
  * @returns {object[]} Valid, enabled sources for this type.
  */
 export function validateConnectorSources(sources, type) {
-    return (sources || []).filter(s => {
-        if (s.type !== type) return false;
-        if (s.enabled === false) return false;
-        if (!s.url) {
-            logger.warn(`[${type}] Source missing URL, skipping: ${s.name || 'unnamed'}`);
-            return false;
-        }
-        return true;
-    });
+  return (sources || []).filter((s) => {
+    if (s.type !== type) return false;
+    if (s.enabled === false) return false;
+    if (!s.url) {
+      logger.warn(
+        `[${type}] Source missing URL, skipping: ${s.name || "unnamed"}`,
+      );
+      return false;
+    }
+    return true;
+  });
 }
 
 // ── Stat Builder ─────────────────────────────────────────────────────────────
@@ -120,15 +136,15 @@ export function validateConnectorSources(sources, type) {
  * @returns {object}
  */
 export function buildFeedStat(source, items, error, durationMs) {
-    return {
-        type: source.type,
-        url: source.url,
-        name: source.name || 'Unknown',
-        count: items.length,
-        durationMs,
-        success: !error,
-        error: error || null,
-    };
+  return {
+    type: source.type,
+    url: source.url,
+    name: source.name || "Unknown",
+    count: items.length,
+    durationMs,
+    success: !error,
+    error: error || null,
+  };
 }
 
 // ── Source List Builder ──────────────────────────────────────────────────────
@@ -141,34 +157,46 @@ export function buildFeedStat(source, items, error, durationMs) {
  * @returns {object[]} Unified source list with `{ type, url, name, enabled }`.
  */
 export function buildSourceList(config) {
-    const sources = [];
-    const seenUrls = new Set();
+  const sources = [];
+  const seenUrls = new Set();
 
-    // 1. Convert legacy feeds[] to source objects
-    for (const entry of (config.feeds || [])) {
-        const url = typeof entry === 'string' ? entry : entry.url;
-        const name = typeof entry === 'string' ? hostnameLabel(url) : (entry.name || hostnameLabel(url));
-        if (url && !seenUrls.has(url)) {
-            seenUrls.add(url);
-            sources.push({ type: 'rss', url, name, enabled: true });
-        }
+  // 1. Convert legacy feeds[] to source objects
+  for (const entry of config.feeds || []) {
+    const url = typeof entry === "string" ? entry : entry.url;
+    const name =
+      typeof entry === "string"
+        ? hostnameLabel(url)
+        : entry.name || hostnameLabel(url);
+    if (url && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      sources.push({
+        type: "rss",
+        url,
+        name,
+        enabled: true,
+        etag: entry.etag,
+        lastModified: entry.lastModified,
+      });
     }
+  }
 
-    // 2. Merge explicit sources[] (new format)
-    for (const s of (config.sources || [])) {
-        if (s.url && !seenUrls.has(s.url)) {
-            seenUrls.add(s.url);
-            sources.push({
-                type: s.type || 'rss',
-                url: s.url,
-                name: s.name || hostnameLabel(s.url),
-                enabled: s.enabled !== false,
-                metadata: s.metadata || {},
-            });
-        }
+  // 2. Merge explicit sources[] (new format)
+  for (const s of config.sources || []) {
+    if (s.url && !seenUrls.has(s.url)) {
+      seenUrls.add(s.url);
+      sources.push({
+        type: s.type || "rss",
+        url: s.url,
+        name: s.name || hostnameLabel(s.url),
+        enabled: s.enabled !== false,
+        metadata: s.metadata || {},
+        etag: s.etag,
+        lastModified: s.lastModified,
+      });
     }
+  }
 
-    return sources.filter(s => s.enabled !== false);
+  return sources.filter((s) => s.enabled !== false);
 }
 
 /**
@@ -178,13 +206,13 @@ export function buildSourceList(config) {
  * @returns {Map<string, object[]>}
  */
 export function groupByType(sources) {
-    const groups = new Map();
-    for (const s of sources) {
-        const type = s.type || 'rss';
-        if (!groups.has(type)) groups.set(type, []);
-        groups.get(type).push(s);
-    }
-    return groups;
+  const groups = new Map();
+  for (const s of sources) {
+    const type = s.type || "rss";
+    if (!groups.has(type)) groups.set(type, []);
+    groups.get(type).push(s);
+  }
+  return groups;
 }
 
 // ── Internal Helpers ─────────────────────────────────────────────────────────
@@ -195,10 +223,10 @@ export function groupByType(sources) {
  * @returns {string}
  */
 function hostnameLabel(url) {
-    try {
-        const { hostname } = new URL(url);
-        return hostname.replace(/^www\./, '').split('.')[0];
-    } catch {
-        return url;
-    }
+  try {
+    const { hostname } = new URL(url);
+    return hostname.replace(/^www\./, "").split(".")[0];
+  } catch {
+    return url;
+  }
 }

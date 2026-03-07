@@ -196,7 +196,7 @@
         "frontendOnlyNoBackend": -5,
         "differentPrimaryLanguage": -10
     },
-    "notificationThreshold": 50,
+    "notificationThreshold": 45,
     "filters": {
         "workPreference": [
             "remote",

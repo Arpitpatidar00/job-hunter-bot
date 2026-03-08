@@ -380,12 +380,11 @@ async function processFeeds(messages, env) {
       messages.push({ body: payload });
     }
 
-    // Cloudflare Queues support up to 100 messages per sendBatch
-    for (let i = 0; i < messages.length; i += 100) {
-      await withRetry(() =>
-        env.JOB_QUEUE.sendBatch(messages.slice(i, i + 100)),
-      );
-      await sleep(200); // Pace queue sends
+    // Cloudflare Queues batch size limit is 256KB total.
+    // At ~20KB per message (chunk of 20 jobs), 5 messages is ~100KB per batch.
+    for (let i = 0; i < messages.length; i += 5) {
+      await withRetry(() => env.JOB_QUEUE.sendBatch(messages.slice(i, i + 5)));
+      await sleep(500); // Pace queue sends to avoid Too Many Requests
     }
 
     queueMsgs = messages.length;
@@ -869,12 +868,13 @@ async function _scheduledImpl(event, env, ctx) {
   let queueSuccess = false;
   try {
     const batchMessages = sourcesToCrawl.map((s) => ({ body: s }));
-    // sendBatch supports up to 100 messages per call
-    for (let i = 0; i < batchMessages.length; i += 100) {
+    // sendBatch supports up to 100 messages per call, but rate limiting can occur.
+    // Batching 25 sources per send and adding a 500ms sleep helps avoid 429 Too Many Requests.
+    for (let i = 0; i < batchMessages.length; i += 25) {
       await withRetry(() =>
-        env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100)),
+        env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 25)),
       );
-      await sleep(200); // Pace queue sends
+      await sleep(500); // Pace queue sends
     }
     logger.info(
       `[Producer] Successfully queued ${sourcesToCrawl.length} sources`,
@@ -1166,11 +1166,12 @@ export default {
         let queueFailed = false;
         try {
           const batchMessages = allSources.map((s) => ({ body: s }));
-          for (let i = 0; i < batchMessages.length; i += 100) {
+          for (let i = 0; i < batchMessages.length; i += 25) {
             // Issue 3: Retry with backoff before falling back to direct
             await withRetry(() =>
-              env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 100)),
+              env.FEED_QUEUE.sendBatch(batchMessages.slice(i, i + 25)),
             );
+            await sleep(500); // Pace queue sends
           }
           sent = allSources.length;
         } catch (err) {

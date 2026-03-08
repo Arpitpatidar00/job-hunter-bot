@@ -1,6 +1,6 @@
 {
   "name": "job-hunter-bot",
-  "version": "3.1.0",
+  "version": "5.2.0",
   "description": "Cloudflare Worker — polls RSS feeds for remote jobs, matches skills via multi-layer scoring, alerts via Discord/Telegram",
   "main": "src/worker.js",
   "type": "module",

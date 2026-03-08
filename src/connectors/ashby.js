@@ -8,10 +8,10 @@
  * The Ashby API uses POST with no body to return the job board data.
  */
 
-import { fetchWithTimeout, rateLimitDomain } from './base.js';
-import { normalizeJob } from '../core/schema.js';
-import { sanitizeText, pLimit } from '../core/utils.js';
-import logger from '../core/logger.js';
+import { fetchWithTimeout, rateLimitDomain } from "./base.js";
+import { normalizeJob } from "../core/schema.js";
+import { sanitizeText, pLimit } from "../core/utils.js";
+import logger from "../core/logger.js";
 
 /** Max concurrent Ashby API requests. */
 const CONCURRENCY = 3;
@@ -27,26 +27,26 @@ const CONCURRENCY = 3;
  * @returns {string}
  */
 function extractSlug(urlOrSlug) {
-    try {
-        const url = new URL(urlOrSlug);
-        // Validate it's an HTTP URL
-        if (!url.protocol.startsWith('http')) {
-            logger.warn(`[Ashby] Non-HTTP URL: ${urlOrSlug}`);
-            return urlOrSlug;
-        }
-        const parts = url.pathname.split('/').filter(Boolean);
-        // /posting-api/job-board/{slug} → last segment
-        const boardIdx = parts.indexOf('job-board');
-        if (boardIdx >= 0 && parts[boardIdx + 1]) return parts[boardIdx + 1];
-        if (parts.length > 0) return parts[parts.length - 1];
-    } catch {
-        // Plain slug — validate it doesn't contain dangerous chars
-        if (/[<>"';\s]/.test(urlOrSlug)) {
-            logger.warn(`[Ashby] Invalid slug: ${urlOrSlug}`);
-            return '';
-        }
+  try {
+    const url = new URL(urlOrSlug);
+    // Validate it's an HTTP URL
+    if (!url.protocol.startsWith("http")) {
+      logger.warn(`[Ashby] Non-HTTP URL: ${urlOrSlug}`);
+      return urlOrSlug;
     }
-    return urlOrSlug;
+    const parts = url.pathname.split("/").filter(Boolean);
+    // /posting-api/job-board/{slug} → last segment
+    const boardIdx = parts.indexOf("job-board");
+    if (boardIdx >= 0 && parts[boardIdx + 1]) return parts[boardIdx + 1];
+    if (parts.length > 0) return parts[parts.length - 1];
+  } catch {
+    // Plain slug — validate it doesn't contain dangerous chars
+    if (/[<>"';\s]/.test(urlOrSlug)) {
+      logger.warn(`[Ashby] Invalid slug: ${urlOrSlug}`);
+      return "";
+    }
+  }
+  return urlOrSlug;
 }
 
 /**
@@ -55,7 +55,7 @@ function extractSlug(urlOrSlug) {
  * @returns {string}
  */
 function buildApiUrl(slug) {
-    return `https://api.ashbyhq.com/posting-api/job-board/${slug}`;
+  return `https://api.ashbyhq.com/posting-api/job-board/${slug}`;
 }
 
 /**
@@ -69,30 +69,35 @@ function buildApiUrl(slug) {
  * }
  */
 function normalizeAshbyJob(ashbyJob, source, slug) {
-    const categories = [];
-    if (ashbyJob.departmentName) categories.push(ashbyJob.departmentName);
-    if (ashbyJob.locationName) categories.push(ashbyJob.locationName);
-    if (ashbyJob.employmentType) categories.push(ashbyJob.employmentType);
-    if (ashbyJob.isRemote) categories.push('Remote');
+  const categories = [];
+  if (ashbyJob.departmentName) categories.push(ashbyJob.departmentName);
+  if (ashbyJob.locationName) categories.push(ashbyJob.locationName);
+  if (ashbyJob.employmentType) categories.push(ashbyJob.employmentType);
+  if (ashbyJob.isRemote) categories.push("Remote");
 
-    const content = ashbyJob.descriptionPlain
-        || sanitizeText(ashbyJob.descriptionHtml || '')
-        || '';
+  const content =
+    ashbyJob.descriptionPlain ||
+    sanitizeText(ashbyJob.descriptionHtml || "") ||
+    "";
 
-    return normalizeJob({
-        id: `ashby-${ashbyJob.id}`,
-        title: ashbyJob.title || '',
-        content,
-        link: ashbyJob.jobUrl || `https://jobs.ashbyhq.com/${slug}/${ashbyJob.id}`,
-        pubDate: ashbyJob.publishedAt || '',
-        isoDate: ashbyJob.publishedAt || '',
-        categories,
-        company: source.name || '',
-    }, {
-        url: source.url,
-        name: source.name || 'Ashby',
-        type: 'ashby',
-    });
+  return normalizeJob(
+    {
+      id: `ashby-${ashbyJob.id}`,
+      title: ashbyJob.title || "",
+      content,
+      link:
+        ashbyJob.jobUrl || `https://jobs.ashbyhq.com/${slug}/${ashbyJob.id}`,
+      pubDate: ashbyJob.publishedAt || "",
+      isoDate: ashbyJob.publishedAt || "",
+      categories,
+      company: source.name || "",
+    },
+    {
+      url: source.url,
+      name: source.name || "Ashby",
+      type: "ashby",
+    },
+  );
 }
 
 /**
@@ -103,42 +108,60 @@ function normalizeAshbyJob(ashbyJob, source, slug) {
  * @returns {Promise<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>}
  */
 async function fetchSingleBoard(source, config) {
-    const slug = extractSlug(source.url);
-    const apiUrl = buildApiUrl(slug);
+  const slug = extractSlug(source.url);
+  const apiUrl = buildApiUrl(slug);
 
-    try {
-        await rateLimitDomain(apiUrl);
-        const res = await fetchWithTimeout(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
+  try {
+    await rateLimitDomain(apiUrl);
 
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-        }
+    // Ashby requires a specific GraphQL payload to fetch public job boards
+    const payload = {
+      operationName: "ApiJobBoardWithTeams",
+      variables: {
+        organizationHostedJobsPageName: slug,
+      },
+      query:
+        "query ApiJobBoardWithTeams($organizationHostedJobsPageName: String!) { jobBoard: jobBoardWithTeams( organizationHostedJobsPageName: $organizationHostedJobsPageName ) { jobPostings { id title locationName isRemote employmentType departmentName publishedAt jobUrl descriptionHtml descriptionPlain } } }",
+    };
 
-        const data = await res.json();
-        const ashbyJobs = data.jobs || [];
+    const res = await fetchWithTimeout(
+      "https://api.ashbyhq.com/posting-api/graphql",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      },
+    );
 
-        const items = ashbyJobs.map(j => normalizeAshbyJob(j, source, slug));
-
-        logger.info(`[Ashby] ${source.name}: ${items.length} jobs fetched`);
-
-        return {
-            feedUrl: source.url,
-            sourceName: source.name || slug,
-            items,
-        };
-    } catch (err) {
-        const msg = err.name === 'AbortError' ? 'Timeout' : err.message;
-        logger.warn(`[Ashby] ${source.name || slug} failed: ${msg}`);
-        return {
-            feedUrl: source.url,
-            sourceName: source.name || slug,
-            items: [],
-            error: msg,
-        };
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
+
+    const data = await res.json();
+    const ashbyJobs = data?.data?.jobBoard?.jobPostings || [];
+
+    const items = ashbyJobs.map((j) => normalizeAshbyJob(j, source, slug));
+
+    logger.info(`[Ashby] ${source.name}: ${items.length} jobs fetched`);
+
+    return {
+      feedUrl: source.url,
+      sourceName: source.name || slug,
+      items,
+    };
+  } catch (err) {
+    const msg = err.name === "AbortError" ? "Timeout" : err.message;
+    logger.warn(`[Ashby] ${source.name || slug} failed: ${msg}`);
+    return {
+      feedUrl: source.url,
+      sourceName: source.name || slug,
+      items: [],
+      error: msg,
+    };
+  }
 }
 
 /**
@@ -149,21 +172,21 @@ async function fetchSingleBoard(source, config) {
  * @returns {Promise<Array<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>>}
  */
 export async function fetchAshbyJobs(sources, config) {
-    const limit = pLimit(CONCURRENCY);
+  const limit = pLimit(CONCURRENCY);
 
-    const promises = sources.map(source =>
-        limit(() => fetchSingleBoard(source, config))
-    );
+  const promises = sources.map((source) =>
+    limit(() => fetchSingleBoard(source, config)),
+  );
 
-    const results = await Promise.allSettled(promises);
+  const results = await Promise.allSettled(promises);
 
-    return results.map((result, i) => {
-        if (result.status === 'fulfilled') return result.value;
-        return {
-            feedUrl: sources[i].url,
-            sourceName: sources[i].name,
-            items: [],
-            error: result.reason?.message || 'Unknown error',
-        };
-    });
+  return results.map((result, i) => {
+    if (result.status === "fulfilled") return result.value;
+    return {
+      feedUrl: sources[i].url,
+      sourceName: sources[i].name,
+      items: [],
+      error: result.reason?.message || "Unknown error",
+    };
+  });
 }

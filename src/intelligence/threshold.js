@@ -40,29 +40,56 @@ const EFFECTIVE_KEY = 'thresh:effective';
 /** TTL for threshold data — 60 days. */
 const THRESHOLD_TTL = 60 * 24 * 60 * 60;
 
+/** In-memory cache for threshold values to reduce KV reads */
+let _cachedEffective = null;
+let _cachedWindow = null;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function readWindow(kv) {
+    // Use in-memory cache if available
+    if (_cachedWindow !== null) return _cachedWindow;
+    
     try {
         const raw = await kv.get(WINDOW_KEY);
-        return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
+        _cachedWindow = raw ? JSON.parse(raw) : [];
+        return _cachedWindow;
+    } catch { 
+        return []; 
+    }
 }
 
 async function saveWindow(kv, window) {
+    // Update in-memory cache immediately
+    _cachedWindow = window;
+    
     try {
         await kv.put(WINDOW_KEY, JSON.stringify(window), { expirationTtl: THRESHOLD_TTL });
     } catch { }
 }
 
 async function readEffective(kv, configDefault) {
+    // Use in-memory cache if available
+    if (_cachedEffective !== null) return _cachedEffective;
+    
     try {
         const raw = await kv.get(EFFECTIVE_KEY);
-        return raw ? parseInt(raw, 10) : configDefault;
-    } catch { return configDefault; }
+        _cachedEffective = raw ? parseInt(raw, 10) : configDefault;
+        return _cachedEffective;
+    } catch { 
+        return configDefault; 
+    }
 }
 
 async function saveEffective(kv, value) {
+    // Only write to KV if value actually changed significantly
+    if (_cachedEffective !== null && Math.abs(_cachedEffective - value) < 2) {
+        return; // Skip KV write if change is minor
+    }
+    
+    // Update in-memory cache
+    _cachedEffective = value;
+    
     try {
         await kv.put(EFFECTIVE_KEY, String(value), { expirationTtl: THRESHOLD_TTL });
     } catch { }
@@ -136,4 +163,23 @@ export async function getEffectiveThreshold(kv, configThreshold, context = {}) {
     if (adjusted) await saveEffective(kv, next);
 
     return { effective: next, base: configThreshold, adjusted };
+}
+
+/**
+ * Batch record multiple job scores with a single KV write.
+ * Reduces KV writes from N (per job) to 1 (per batch).
+ * 
+ * @param {KVNamespace} kv
+ * @param {number[]} scores - Array of scores to record
+ */
+export async function recordJobScoresBatch(kv, scores) {
+    if (!scores || scores.length === 0) return;
+    
+    const window = await readWindow(kv);
+    // Add all scores at once
+    window.push(...scores);
+    // Keep only the last WINDOW_SIZE entries
+    if (window.length > WINDOW_SIZE) window.splice(0, window.length - WINDOW_SIZE);
+    // Single KV write for all scores
+    await saveWindow(kv, window);
 }

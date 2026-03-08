@@ -1,0 +1,1090 @@
+
+> job-hunter-bot@5.2.0 test
+> node --experimental-vm-modules node_modules/.bin/jest --testEnvironment=node
+
+(node:39270) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS tests/e2e.v4-relevance.test.js
+  ● Console
+
+    console.log
+      [INFO] [FastMatcher] Built Aho-Corasick trie with 34 keywords
+
+      at emit (src/core/logger.js:43:18)
+
+(node:39269) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS tests/stress.notifications.test.js
+  ● Console
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (60%) — Backend Engineer — Node.js TypeScript 0 — https://jobs.example.com/j/0
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (61%) — Backend Engineer — Node.js TypeScript 1 — https://jobs.example.com/j/1
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (62%) — Backend Engineer — Node.js TypeScript 2 — https://jobs.example.com/j/2
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (63%) — Backend Engineer — Node.js TypeScript 3 — https://jobs.example.com/j/3
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (64%) — Backend Engineer — Node.js TypeScript 4 — https://jobs.example.com/j/4
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (65%) — Backend Engineer — Node.js TypeScript 5 — https://jobs.example.com/j/5
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (66%) — Backend Engineer — Node.js TypeScript 6 — https://jobs.example.com/j/6
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (67%) — Backend Engineer — Node.js TypeScript 7 — https://jobs.example.com/j/7
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (68%) — Backend Engineer — Node.js TypeScript 8 — https://jobs.example.com/j/8
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (69%) — Backend Engineer — Node.js TypeScript 9 — https://jobs.example.com/j/9
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (70%) — Backend Engineer — Node.js TypeScript 10 — https://jobs.example.com/j/10
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (71%) — Backend Engineer — Node.js TypeScript 11 — https://jobs.example.com/j/11
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (72%) — Backend Engineer — Node.js TypeScript 12 — https://jobs.example.com/j/12
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (73%) — Backend Engineer — Node.js TypeScript 13 — https://jobs.example.com/j/13
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (74%) — Backend Engineer — Node.js TypeScript 14 — https://jobs.example.com/j/14
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (75%) — Backend Engineer — Node.js TypeScript 15 — https://jobs.example.com/j/15
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (76%) — Backend Engineer — Node.js TypeScript 16 — https://jobs.example.com/j/16
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (77%) — Backend Engineer — Node.js TypeScript 17 — https://jobs.example.com/j/17
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (78%) — Backend Engineer — Node.js TypeScript 18 — https://jobs.example.com/j/18
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (79%) — Backend Engineer — Node.js TypeScript 19 — https://jobs.example.com/j/19
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (80%) — Backend Engineer — Node.js TypeScript 20 — https://jobs.example.com/j/20
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (81%) — Backend Engineer — Node.js TypeScript 21 — https://jobs.example.com/j/21
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (82%) — Backend Engineer — Node.js TypeScript 22 — https://jobs.example.com/j/22
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (83%) — Backend Engineer — Node.js TypeScript 23 — https://jobs.example.com/j/23
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (84%) — Backend Engineer — Node.js TypeScript 24 — https://jobs.example.com/j/24
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (85%) — Backend Engineer — Node.js TypeScript 25 — https://jobs.example.com/j/25
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (86%) — Backend Engineer — Node.js TypeScript 26 — https://jobs.example.com/j/26
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (87%) — Backend Engineer — Node.js TypeScript 27 — https://jobs.example.com/j/27
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (88%) — Backend Engineer — Node.js TypeScript 28 — https://jobs.example.com/j/28
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (89%) — Backend Engineer — Node.js TypeScript 29 — https://jobs.example.com/j/29
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (90%) — Backend Engineer — Node.js TypeScript 30 — https://jobs.example.com/j/30
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (91%) — Backend Engineer — Node.js TypeScript 31 — https://jobs.example.com/j/31
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (92%) — Backend Engineer — Node.js TypeScript 32 — https://jobs.example.com/j/32
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (93%) — Backend Engineer — Node.js TypeScript 33 — https://jobs.example.com/j/33
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (94%) — Backend Engineer — Node.js TypeScript 34 — https://jobs.example.com/j/34
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (95%) — Backend Engineer — Node.js TypeScript 35 — https://jobs.example.com/j/35
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (96%) — Backend Engineer — Node.js TypeScript 36 — https://jobs.example.com/j/36
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (97%) — Backend Engineer — Node.js TypeScript 37 — https://jobs.example.com/j/37
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (98%) — Backend Engineer — Node.js TypeScript 38 — https://jobs.example.com/j/38
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (99%) — Backend Engineer — Node.js TypeScript 39 — https://jobs.example.com/j/39
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (60%) — Backend Engineer — Node.js TypeScript 40 — https://jobs.example.com/j/40
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (61%) — Backend Engineer — Node.js TypeScript 41 — https://jobs.example.com/j/41
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (62%) — Backend Engineer — Node.js TypeScript 42 — https://jobs.example.com/j/42
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (63%) — Backend Engineer — Node.js TypeScript 43 — https://jobs.example.com/j/43
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (64%) — Backend Engineer — Node.js TypeScript 44 — https://jobs.example.com/j/44
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (65%) — Backend Engineer — Node.js TypeScript 45 — https://jobs.example.com/j/45
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (66%) — Backend Engineer — Node.js TypeScript 46 — https://jobs.example.com/j/46
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (67%) — Backend Engineer — Node.js TypeScript 47 — https://jobs.example.com/j/47
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (68%) — Backend Engineer — Node.js TypeScript 48 — https://jobs.example.com/j/48
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (69%) — Backend Engineer — Node.js TypeScript 49 — https://jobs.example.com/j/49
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (70%) — Backend Engineer — Node.js TypeScript 50 — https://jobs.example.com/j/50
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (71%) — Backend Engineer — Node.js TypeScript 51 — https://jobs.example.com/j/51
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (72%) — Backend Engineer — Node.js TypeScript 52 — https://jobs.example.com/j/52
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (73%) — Backend Engineer — Node.js TypeScript 53 — https://jobs.example.com/j/53
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (74%) — Backend Engineer — Node.js TypeScript 54 — https://jobs.example.com/j/54
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (75%) — Backend Engineer — Node.js TypeScript 55 — https://jobs.example.com/j/55
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (76%) — Backend Engineer — Node.js TypeScript 56 — https://jobs.example.com/j/56
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (77%) — Backend Engineer — Node.js TypeScript 57 — https://jobs.example.com/j/57
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (78%) — Backend Engineer — Node.js TypeScript 58 — https://jobs.example.com/j/58
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (79%) — Backend Engineer — Node.js TypeScript 59 — https://jobs.example.com/j/59
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (80%) — Backend Engineer — Node.js TypeScript 60 — https://jobs.example.com/j/60
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (81%) — Backend Engineer — Node.js TypeScript 61 — https://jobs.example.com/j/61
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (82%) — Backend Engineer — Node.js TypeScript 62 — https://jobs.example.com/j/62
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (83%) — Backend Engineer — Node.js TypeScript 63 — https://jobs.example.com/j/63
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (84%) — Backend Engineer — Node.js TypeScript 64 — https://jobs.example.com/j/64
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (85%) — Backend Engineer — Node.js TypeScript 65 — https://jobs.example.com/j/65
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (86%) — Backend Engineer — Node.js TypeScript 66 — https://jobs.example.com/j/66
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (87%) — Backend Engineer — Node.js TypeScript 67 — https://jobs.example.com/j/67
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (88%) — Backend Engineer — Node.js TypeScript 68 — https://jobs.example.com/j/68
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (89%) — Backend Engineer — Node.js TypeScript 69 — https://jobs.example.com/j/69
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (90%) — Backend Engineer — Node.js TypeScript 70 — https://jobs.example.com/j/70
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (91%) — Backend Engineer — Node.js TypeScript 71 — https://jobs.example.com/j/71
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (92%) — Backend Engineer — Node.js TypeScript 72 — https://jobs.example.com/j/72
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (93%) — Backend Engineer — Node.js TypeScript 73 — https://jobs.example.com/j/73
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (94%) — Backend Engineer — Node.js TypeScript 74 — https://jobs.example.com/j/74
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (95%) — Backend Engineer — Node.js TypeScript 75 — https://jobs.example.com/j/75
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (96%) — Backend Engineer — Node.js TypeScript 76 — https://jobs.example.com/j/76
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (97%) — Backend Engineer — Node.js TypeScript 77 — https://jobs.example.com/j/77
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (98%) — Backend Engineer — Node.js TypeScript 78 — https://jobs.example.com/j/78
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (99%) — Backend Engineer — Node.js TypeScript 79 — https://jobs.example.com/j/79
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (60%) — Backend Engineer — Node.js TypeScript 80 — https://jobs.example.com/j/80
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (61%) — Backend Engineer — Node.js TypeScript 81 — https://jobs.example.com/j/81
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (62%) — Backend Engineer — Node.js TypeScript 82 — https://jobs.example.com/j/82
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (63%) — Backend Engineer — Node.js TypeScript 83 — https://jobs.example.com/j/83
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (64%) — Backend Engineer — Node.js TypeScript 84 — https://jobs.example.com/j/84
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (65%) — Backend Engineer — Node.js TypeScript 85 — https://jobs.example.com/j/85
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (66%) — Backend Engineer — Node.js TypeScript 86 — https://jobs.example.com/j/86
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (67%) — Backend Engineer — Node.js TypeScript 87 — https://jobs.example.com/j/87
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (68%) — Backend Engineer — Node.js TypeScript 88 — https://jobs.example.com/j/88
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (69%) — Backend Engineer — Node.js TypeScript 89 — https://jobs.example.com/j/89
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (70%) — Backend Engineer — Node.js TypeScript 90 — https://jobs.example.com/j/90
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🔵 Moderate Match (71%) — Backend Engineer — Node.js TypeScript 91 — https://jobs.example.com/j/91
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (72%) — Backend Engineer — Node.js TypeScript 92 — https://jobs.example.com/j/92
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (73%) — Backend Engineer — Node.js TypeScript 93 — https://jobs.example.com/j/93
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (74%) — Backend Engineer — Node.js TypeScript 94 — https://jobs.example.com/j/94
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (75%) — Backend Engineer — Node.js TypeScript 95 — https://jobs.example.com/j/95
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (76%) — Backend Engineer — Node.js TypeScript 96 — https://jobs.example.com/j/96
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (77%) — Backend Engineer — Node.js TypeScript 97 — https://jobs.example.com/j/97
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (78%) — Backend Engineer — Node.js TypeScript 98 — https://jobs.example.com/j/98
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (79%) — Backend Engineer — Node.js TypeScript 99 — https://jobs.example.com/j/99
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      ✅ Dry-run: 100/100 alerts sent in 8ms
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:103:17)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟡 Strong Match (85%) — Backend Engineer — Node.js TypeScript 0 — https://jobs.example.com/j/0
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      [INFO] [Mock Alert] 🟡 75% — Backend Engineer — Node.js TypeScript 0 — https://jobs.example.com/j/0 (no channels configured)
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      ✅ Multi-profile dedup: 500 unique alert keys for 10 profiles × 50 jobs
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:142:17)
+
+    console.log
+      ✅ Dedup: hasSentAlert correctly detected duplicate for test-job-001:profile-001
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:188:17)
+
+    console.log
+      ✅ Score labels: 10 ranges verified (Excellent≥88, Strong≥72, Moderate≥55, Weak≥38, Poor<38)
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:209:17)
+
+    console.log
+      ✅ Determinism: score 100 reproduced 100/100 times
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:267:17)
+
+    console.log
+      ✅ Exclusion: 50/50 runs returned excluded=true, score=0
+
+      at Object.<anonymous> (tests/stress.notifications.test.js:281:17)
+
+    console.log
+      [INFO] [DRY RUN] Would send alert: 🟢 Excellent Match (90%) — Backend Engineer — Node.js TypeScript 0 — https://jobs.example.com/j/0
+
+      at emit (src/core/logger.js:43:18)
+
+(node:39267) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:39268) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS tests/stress.resilience.test.js
+  ● Console
+
+    console.log
+      ✅ 200KB job scored in 26ms, score: 81
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:105:17)
+
+    console.log
+      ✅ Threshold boundary test: score=80 vs threshold=65 → PASS
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:120:17)
+
+    console.log
+      ✅ Score clamped: 100/100 with all bonuses stacked
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:141:17)
+
+    console.log
+      ✅ Score floor: 0 (no negative scores)
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:151:17)
+
+    console.log
+      ✅ Concurrent dedup: 1 unique, 499 dupes from 500 identical hashes
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:251:17)
+
+    console.log
+      ✅ Undefined hash: 50/50 jobs passed through without false dedup
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:269:17)
+
+    console.warn
+      [WARN] Could not parse date: "not-a-date"
+
+      42 |     if (!isNaN(d.getTime())) return d;
+      43 |
+    > 44 |     console.warn(`[WARN] Could not parse date: "${dateStr}"`);
+         |             ^
+      45 |     return null;
+      46 | }
+      47 |
+
+      at parseDate (src/core/utils.js:44:13)
+      at isNewJob (src/scoring/relevance.js:902:18)
+      at Object.<anonymous> (tests/stress.resilience.test.js:301:20)
+
+    console.warn
+      [WARN] Could not parse date: "0000-00-00"
+
+      42 |     if (!isNaN(d.getTime())) return d;
+      43 |
+    > 44 |     console.warn(`[WARN] Could not parse date: "${dateStr}"`);
+         |             ^
+      45 |     return null;
+      46 | }
+      47 |
+
+      at parseDate (src/core/utils.js:44:13)
+      at isNewJob (src/scoring/relevance.js:902:18)
+      at Object.<anonymous> (tests/stress.resilience.test.js:301:20)
+
+    console.warn
+      [WARN] Could not parse date: "NaN"
+
+      42 |     if (!isNaN(d.getTime())) return d;
+      43 |
+    > 44 |     console.warn(`[WARN] Could not parse date: "${dateStr}"`);
+         |             ^
+      45 |     return null;
+      46 | }
+      47 |
+
+      at parseDate (src/core/utils.js:44:13)
+      at isNewJob (src/scoring/relevance.js:902:18)
+      at Object.<anonymous> (tests/stress.resilience.test.js:301:20)
+
+    console.warn
+      [WARN] Could not parse date: "∞"
+
+      42 |     if (!isNaN(d.getTime())) return d;
+      43 |
+    > 44 |     console.warn(`[WARN] Could not parse date: "${dateStr}"`);
+         |             ^
+      45 |     return null;
+      46 | }
+      47 |
+
+      at parseDate (src/core/utils.js:44:13)
+      at isNewJob (src/scoring/relevance.js:902:18)
+      at Object.<anonymous> (tests/stress.resilience.test.js:301:20)
+
+    console.log
+      
+      ⚡ COMBINED PEAK LOAD RESULTS:
+         Jobs processed: 2000/2000
+         Passed threshold: 1000
+         Blocked: 600
+         Excluded: 400
+         Crashed: 0
+         Total time: 3256ms
+         Throughput: 614 jobs/sec
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:362:17)
+
+    console.log
+      ✅ D1 chunking: 500 jobs → 13 batches of ≤40
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:388:17)
+
+    console.log
+      ✅ Chunk reduction: old 50→6 msgs/batch, new 20→15 msgs/batch (less CPU per message)
+
+      at Object.<anonymous> (tests/stress.resilience.test.js:400:17)
+
+PASS tests/stress.pipeline.test.js
+  ● Console
+
+    console.log
+      ✅ Scored 500 jobs in 198ms (2525 jobs/sec)
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:219:17)
+
+    console.log
+      ✅ Excellent job scored: 100 — Title match (1): "software engineer"; Must-match (4/4): javascript, node.js, typescript, react; Shou
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:241:17)
+
+    console.log
+      ✅ Dedup: 452 unique, 48 dupes (9.6% dup rate)
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:269:17)
+
+    console.log
+      ✅ Time window: 312 kept, 688 filtered from 1000 jobs
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:296:17)
+
+    console.log
+      [INFO] [D1] Batch inserted 425 new jobs (75 dupes) in 13 batches
+
+      at emit (src/core/logger.js:43:18)
+
+    console.log
+      ✅ D1 Batch: 425 inserted, 75 dupes from 500 jobs
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:333:17)
+
+    console.warn
+      [WARN] [D1] markAlertSent skipped: job ghost-job-xyz not found in jobs table (FK guard)
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at markAlertSent (src/db/profiles.js:76:14)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:342:9)
+
+    console.log
+      ✅ FK guard: markAlertSent silently skipped for non-existent job
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:345:17)
+
+    console.log
+      ✅ FK guard: markAlertSent correctly inserted for existing job
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:355:17)
+
+    console.warn
+      [WARN] [D1] Skipping batch insert: Missing url for "No URL job"
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at src/db/jobs.js:67:20
+          at Array.filter (<anonymous>)
+      at batchInsertJobs (src/db/jobs.js:64:28)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:374:36)
+
+    console.warn
+      [WARN] [D1] Skipping batch insert: Missing url for "Empty URL"
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at src/db/jobs.js:67:20
+          at Array.filter (<anonymous>)
+      at batchInsertJobs (src/db/jobs.js:64:28)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:374:36)
+
+    console.log
+      [INFO] [D1] Batch inserted 1 new jobs (0 dupes) in 1 batches
+
+      at emit (src/core/logger.js:43:18)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.warn
+      [WARN] [AI] Subrequest budget exhausted (40 calls used). Skipping embedding.
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:63:12)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:395:32)
+
+    console.log
+      ✅ AI budget: 40 embeddings generated, 10 blocked by budget cap
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:403:17)
+
+    console.warn
+      [WARN] [AI] Transient embedding error (attempt 1/3), retrying in 1000ms: 9000: model temporarily unavailable
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:90:16)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:419:24)
+
+    console.log
+      ✅ AI retry: succeeded after 2 attempts
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:422:17)
+
+    console.warn
+      [WARN] [AI] Transient embedding error (attempt 1/3), retrying in 1000ms: 9000: model temporarily unavailable
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:90:16)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:437:24)
+
+    console.warn
+      [WARN] [AI] Transient embedding error (attempt 2/3), retrying in 2000ms: 9000: model temporarily unavailable
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:90:16)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:437:24)
+
+    console.warn
+      [WARN] [AI] Embedding failed after 3 attempts: 9000: model temporarily unavailable
+
+      40 |
+      41 |     if (level === 'ERROR') console.error(line);
+    > 42 |     else if (level === 'WARN') console.warn(line);
+         |                                        ^
+      43 |     else console.log(line);
+      44 | }
+      45 |
+
+      at emit (src/core/logger.js:42:40)
+      at Object.warn (src/core/logger.js:50:27)
+      at generateEmbedding (src/notifications/ai.js:97:18)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:437:24)
+
+    console.log
+      ✅ AI retry exhausted: gave up after 3 attempts, returned []
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:440:17)
+
+    console.error
+      [ERROR] [AI] Failed to generate embedding: Unknown internal error
+
+      39 |     const line = `${prefix} ${message}${suffix}`;
+      40 |
+    > 41 |     if (level === 'ERROR') console.error(line);
+         |                                    ^
+      42 |     else if (level === 'WARN') console.warn(line);
+      43 |     else console.log(line);
+      44 | }
+
+      at emit (src/core/logger.js:41:36)
+      at Object.error (src/core/logger.js:51:28)
+      at generateEmbedding (src/notifications/ai.js:101:18)
+      at Object.<anonymous> (tests/stress.pipeline.test.js:455:24)
+
+    console.log
+      ✅ AI non-transient: failed fast after 1 call, no retries
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:458:17)
+
+    console.log
+      ✅ withRetry: succeeded after 3 attempts
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:498:17)
+
+    console.log
+      ✅ withRetry: correctly threw after 3 attempts
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:518:17)
+
+    console.log
+      ✅ slimJob: reduced payload from ~120KB to 0.4KB
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:569:17)
+
+    console.log
+      ✅ 20-job slim batch: 8.8KB
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:578:17)
+
+    console.log
+      ✅ Wall-time guard: 23s elapsed > 22s limit correctly detected
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:601:17)
+
+    console.log
+      ✅ Chunk size 20: 100 jobs split into 5 chunks
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:620:17)
+
+    console.log
+      ⚡ BENCHMARK: 1000 jobs in 192ms | 1000 passed | 0 blocked | 0 excluded | 5208 jobs/sec
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:647:17)
+
+    console.log
+      ✅ Source list: 50 sources, types: rss, greenhouse, lever, ashby, workable
+
+      at Object.<anonymous> (tests/stress.pipeline.test.js:659:17)
+
+
+Test Suites: 4 passed, 4 total
+Tests:       87 passed, 87 total
+Snapshots:   0 total
+Time:        4.773 s, estimated 5 s
+Ran all test suites.

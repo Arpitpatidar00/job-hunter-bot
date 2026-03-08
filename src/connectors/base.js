@@ -9,10 +9,18 @@
 
 import logger from "../core/logger.js";
 
-// ── Fetch with Timeout ───────────────────────────────────────────────────────
+// ── Rate Limiting with KV persistence ───────────────────────────────────────
 
-/** Default request timeout in ms. */
-const DEFAULT_TIMEOUT_MS = 10_000;
+/** Optional KV namespace for persistent rate limiting across invocations */
+let _kvBinding = null;
+
+export function setRateLimitKV(kv) {
+  _kvBinding = kv;
+}
+
+const MIN_DOMAIN_INTERVAL_MS = 2000;
+const RATE_LIMIT_TTL = 300; // 5 minutes TTL for rate limit keys
+export const DEFAULT_TIMEOUT_MS = 10000; // 10s default fetch timeout
 
 export async function fetchWithTimeout(
   url,
@@ -66,15 +74,17 @@ export async function fetchWithTimeout(
 
 // ── Rate Limiting per Domain ─────────────────────────────────────────────────
 
-/** In-memory tracker for per-domain request timestamps. */
+/**
+ * In-memory tracker for per-domain request timestamps.
+ * Primary storage - fast and doesn't count toward KV limits.
+ * KV is only used as fallback for cold starts.
+ */
 const _domainTimestamps = new Map();
-
-/** Minimum ms between requests to the same domain (default: 2s). */
-const MIN_DOMAIN_INTERVAL_MS = 2000;
 
 /**
  * Wait if needed to respect the per-domain rate limit.
- * Call this before every outbound fetch to an external API.
+ * OPTIMIZATION: Uses in-memory Map as primary storage.
+ * KV is only used for cold start recovery, not on every request.
  *
  * @param {string} url - The URL being fetched (domain extracted automatically).
  * @param {number} [minIntervalMs=2000]
@@ -90,15 +100,50 @@ export async function rateLimitDomain(
     return; // invalid URL, skip rate limiting
   }
 
-  const lastTs = _domainTimestamps.get(domain) || 0;
-  const elapsed = Date.now() - lastTs;
+  const now = Date.now();
+  let lastTs = 0;
+
+  // Primary: Check in-memory Map first (fast, no KV cost)
+  lastTs = _domainTimestamps.get(domain) || 0;
+
+  // Only check KV if in-memory is empty (cold start)
+  if (lastTs === 0 && _kvBinding) {
+    try {
+      const kvKey = `ratelimit:${domain}`;
+      const cached = await _kvBinding.get(kvKey);
+      if (cached) {
+        lastTs = parseInt(cached, 10);
+        // Populate in-memory for next time
+        _domainTimestamps.set(domain, lastTs);
+      }
+    } catch (e) {
+      // Ignore KV errors, use in-memory only
+    }
+  }
+
+  const elapsed = now - lastTs;
 
   if (elapsed < minIntervalMs) {
     const waitMs = minIntervalMs - elapsed;
     await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 
-  _domainTimestamps.set(domain, Date.now());
+  const newTs = Date.now();
+
+  // Always write to in-memory (fast)
+  _domainTimestamps.set(domain, newTs);
+
+  // OPTIMIZATION: Only write to KV occasionally (every 10th request per domain)
+  // This reduces KV writes from ~960/day to ~96/day
+  if (_kvBinding && Math.random() < 0.1) {
+    try {
+      await _kvBinding.put(`ratelimit:${domain}`, String(newTs), {
+        expirationTtl: RATE_LIMIT_TTL,
+      });
+    } catch (e) {
+      // Ignore KV errors, in-memory is sufficient
+    }
+  }
 }
 
 // ── Source Validation ────────────────────────────────────────────────────────

@@ -6,9 +6,11 @@
 
 import logger from "../core/logger.js";
 import { cosineSimilarity } from "./ai.js";
+import { TopKChunks } from "../core/heap.js";
 
 // AI Call Tracking limits (prevent hitting 50 subrequests budget per invocation)
-const MAX_AI_CALLS_PER_INVOCATION = 48;
+// Keep at 30 to leave room for fetch/D1/queue subrequests
+const MAX_AI_CALLS_PER_INVOCATION = 30;
 let _aiCallCount = 0;
 
 export function resetAiCallCount() {
@@ -67,6 +69,8 @@ export function chunkTexts(text, charLimit = 200, overlapChars = 40) {
  * Generate semantic embedding vectors for an array of CHUNKS in a single subrequest.
  * Caches effectively using Cloudflare KV.
  *
+ * Optimization: Skip if budget exhausted or texts too short (save AI calls).
+ *
  * @param {import('@cloudflare/workers-types').Ai} aiBinding
  * @param {import('@cloudflare/workers-types').KVNamespace} kvBinding
  * @param {string} jobHash - Identifier for caching
@@ -75,6 +79,12 @@ export function chunkTexts(text, charLimit = 200, overlapChars = 40) {
  */
 export async function embedChunks(aiBinding, dbBinding, jobHash, texts) {
   if (!aiBinding || !texts || texts.length === 0) return texts.map(() => []);
+
+  // Skip AI for very short content (not worth embedding)
+  const totalLength = texts.join(" ").length;
+  if (totalLength < 50) {
+    return texts.map(() => []);
+  }
 
   // 1. Budget Check
   if (_aiCallCount >= MAX_AI_CALLS_PER_INVOCATION) {
@@ -163,11 +173,14 @@ export async function retrieveRelevant(dbBinding, profileVec, jobHash, k = 5) {
       };
     });
 
-    // Filter valid vectors, sort by highest similarity, grab top K
-    const topK = chunkScores
-      .filter((c) => c.vec && c.vec.length > 0)
-      .sort((a, b) => b.sim - a.sim)
-      .slice(0, k);
+    // Filter valid vectors, evaluate similarity, grab top K via Min-Heap O(N log K)
+    const topKChunks = new TopKChunks(k);
+    for (const c of chunkScores) {
+      if (c.vec && c.vec.length > 0) {
+        topKChunks.add(c);
+      }
+    }
+    const topK = topKChunks.getTop();
 
     return topK.map((c) => ({ text: c.text, sim: c.sim, vec: c.vec }));
   } catch (e) {

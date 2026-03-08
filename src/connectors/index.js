@@ -15,7 +15,7 @@ import { fetchLeverJobs } from "./lever.js";
 import { fetchAshbyJobs } from "./ashby.js";
 import { fetchWorkableJobs } from "./workable.js";
 import { fetchCareerPageJobs } from "./careerPage.js";
-import { buildSourceList, groupByType } from "./base.js";
+import { buildSourceList, groupByType, setRateLimitKV } from "./base.js";
 import logger from "../core/logger.js";
 
 /**
@@ -64,10 +64,15 @@ const CONNECTOR_MAP = {
  * Run all enabled connectors from config and merge results.
  *
  * @param {object} config - Full bot config.
- * @param {KVNamespace|null} [kv] - Optional KV namespace for RSS cursor-based dedup.
+ * @param {KVNamespace|null} [kv] - Optional KV namespace for RSS cursor-based dedup and rate limiting.
  * @returns {Promise<ConnectorResult>}
  */
 export async function runAllConnectors(config, kv = null) {
+  // Initialize KV for rate limiter if provided
+  if (kv) {
+    setRateLimitKV(kv);
+  }
+  
   const jobs = [];
   const feedStats = [];
   let totalErrors = 0;

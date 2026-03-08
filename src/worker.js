@@ -1,8 +1,9 @@
 /**
  * @module worker
- * @description Cloudflare Worker entry point for Job Hunter Bot v5.1.
+ * @description Cloudflare Worker entry point for Job Hunter Bot v5.2.
  *
  * Architecture: Event-Driven Queue Topology + strictly consistent D1 Dedup
+ * Optimizations: FastMatcher (O(N) scoring), SimHash (O(1) dedup), MinHeap (O(N log K) RAG)
  *
  * Exports:
  *   - fetch:     HTTP handler (health, metrics, manual trigger, feedback)
@@ -15,6 +16,7 @@ import logger from "./core/logger.js";
 import { validateEnv } from "./env.ts";
 import { runAllConnectors } from "./connectors/index.js";
 import { buildSourceList } from "./connectors/base.js";
+import { TopKChunks } from "./core/heap.js";
 import {
   scoreJob,
   isNewJob,
@@ -54,7 +56,7 @@ import {
   getAndIncrementCycle,
   recalculatePriorities,
   getSourcesForCycle,
-  recordSourceYield,
+  recordSourceYieldsBatch,
 } from "./intelligence/sourceIntelligence.js";
 import {
   incrementDailyMetrics,
@@ -71,7 +73,7 @@ import {
 } from "./intelligence/feedHealth.js";
 import {
   getEffectiveThreshold,
-  recordJobScore,
+  recordJobScoresBatch,
 } from "./intelligence/threshold.js";
 import {
   applyFeedbackBoost,
@@ -81,7 +83,11 @@ import { runGrowthEngineCycle } from "./intelligence/growthEngine.js";
 import { retrainThresholds } from "./intelligence/calibration.js";
 
 // AI
-import { generateEmbedding, cosineSimilarity } from "./notifications/ai.js";
+import {
+  generateEmbedding,
+  cosineSimilarity,
+  getProfileEmbedding,
+} from "./notifications/ai.js";
 
 import {
   chunkTexts,
@@ -103,21 +109,145 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Strict pre-filter to reduce unnecessary AI calls.
+ * Only proceeds to AI embedding if job passes initial keyword quality gate.
+ *
+ * Optimization: Requires at least 2 keyword matches OR title match
+ * to avoid burning AI budget on low-quality job postings.
+ */
 function hasBasicKeywordMatch(job, config) {
-  if (job.matchedTerms && job.matchedTerms.length > 0) return true;
+  const mustMatch = config.searchRules?.mustMatch || [];
+  const niceToHave = config.searchRules?.niceToHave || [];
 
-  const terms = [
-    ...(config.searchRules?.mustMatch || []),
-    ...(config.searchRules?.niceToHave || []),
-  ];
-  if (terms.length === 0) return true; // if no rules configured, pass
+  if (mustMatch.length === 0 && niceToHave.length === 0) return true;
 
   const text =
     `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`.toLowerCase();
-  for (const term of terms) {
-    if (text.includes(term.toLowerCase())) return true;
+
+  // Count mustMatch hits (higher quality signal)
+  let mustMatchHits = 0;
+  for (const term of mustMatch) {
+    const lower = term.toLowerCase();
+    // Use word-boundary regex for more precise matching
+    try {
+      if (new RegExp(`\\b${escapeRegex(lower)}\\b`, "i").test(text)) {
+        mustMatchHits++;
+      }
+    } catch {
+      if (text.includes(lower)) mustMatchHits++;
+    }
   }
+
+  // Title match is a strong signal - prioritize jobs with keywords in title
+  const titleLower = (job.title || "").toLowerCase();
+  let titleMatchCount = 0;
+  for (const term of mustMatch) {
+    try {
+      if (
+        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(
+          titleLower,
+        )
+      ) {
+        titleMatchCount++;
+      }
+    } catch {
+      if (titleLower.includes(term.toLowerCase())) titleMatchCount++;
+    }
+  }
+
+  // If strong title match, allow through
+  if (titleMatchCount >= 1) return true;
+
+  // If multiple must-match terms found, allow through
+  if (mustMatchHits >= 2) return true;
+
+  // Check niceToHave but with higher threshold
+  let niceToHaveHits = 0;
+  for (const term of niceToHave) {
+    const lower = term.toLowerCase();
+    try {
+      if (new RegExp(`\\b${escapeRegex(lower)}\\b`, "i").test(text)) {
+        niceToHaveHits++;
+      }
+    } catch {
+      if (text.includes(lower)) niceToHaveHits++;
+    }
+  }
+
+  // Require at least 3 total hits (must + niceToHave)
+  if (mustMatchHits + niceToHaveHits >= 3) return true;
+
   return false;
+}
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Quick keyword-based scoring to determine if AI embedding is needed.
+ * Returns 0-100 score based on keyword matching strength.
+ * Jobs with high scores (>75) can skip AI embedding.
+ */
+function computeQuickKeywordScore(job, config) {
+  const mustMatch = config.searchRules?.mustMatch || [];
+  const niceToHave = config.searchRules?.niceToHave || [];
+
+  if (mustMatch.length === 0 && niceToHave.length === 0) return 50;
+
+  const text =
+    `${job.title || ""} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`.toLowerCase();
+  const titleLower = (job.title || "").toLowerCase();
+
+  let score = 0;
+  let mustHits = 0;
+  let niceHits = 0;
+
+  // Title match is worth more (30 points max)
+  for (const term of mustMatch) {
+    try {
+      if (
+        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(
+          titleLower,
+        )
+      ) {
+        score += 15;
+        mustHits++;
+      }
+    } catch {}
+  }
+
+  // Must-match keywords (40 points max)
+  for (const term of mustMatch) {
+    try {
+      if (
+        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(text)
+      ) {
+        score += 10;
+        mustHits++;
+      }
+    } catch {}
+  }
+
+  // Nice-to-have keywords (30 points max)
+  for (const term of niceToHave) {
+    try {
+      if (
+        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(text)
+      ) {
+        score += 5;
+        niceHits++;
+      }
+    } catch {}
+  }
+
+  // Hard gate: if no must-match hits, cap at 45
+  if (mustHits === 0) {
+    score = Math.min(score, 45);
+  }
+
+  return Math.min(score, 100);
 }
 
 // ── Retry Helper (Issue 3) ────────────────────────────────────────────────────
@@ -150,6 +280,25 @@ async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
   throw lastErr;
 }
 
+// ── Non-Blocking I/O Helper (Phase 3) ───────────────────────────────────────
+/**
+ * Wrap async I/O operations with ctx.waitUntil() to avoid blocking CPU time.
+ * This allows the Worker to return faster while I/O completes in the background.
+ *
+ * @param {ExecutionContext} ctx - Cloudflare Worker execution context
+ * @param {Promise} promise - The async operation to run non-blocking
+ * @param {string} label - Label for logging purposes
+ */
+function deferIO(ctx, promise, label = "deferred") {
+  ctx.waitUntil(
+    promise
+      .then(() => logger.info(`[Deferred] ${label} completed`))
+      .catch((err) =>
+        logger.error(`[Deferred] ${label} failed: ${err.message}`),
+      ),
+  );
+}
+
 // ── Slim Job Projection (Issue 4) ────────────────────────────────────────────
 /**
  * Return only the fields needed by the Evaluator from a job object.
@@ -175,18 +324,18 @@ function slimJob(job) {
 
 // ── Queue Router ─────────────────────────────────────────────────────────────
 
-async function queueHandler(batch, env) {
+async function queueHandler(batch, env, ctx) {
   const queueName = batch.queue;
 
   if (queueName === "feed-queue" || queueName.endsWith("-feed-queue")) {
-    await processFeeds(batch.messages, env);
+    await processFeeds(batch.messages, env, ctx);
   } else if (queueName === "job-queue" || queueName.endsWith("-job-queue")) {
-    await evaluateJobs(batch.messages, env);
+    await evaluateJobs(batch.messages, env, ctx);
   } else if (
     queueName === "alert-queue" ||
     queueName.endsWith("-alert-queue")
   ) {
-    await sendAlerts(batch.messages, env);
+    await sendAlerts(batch.messages, env, ctx);
   } else {
     logger.error(`[Queue] Unknown queue: ${queueName}`);
     for (const msg of batch.messages) {
@@ -196,7 +345,7 @@ async function queueHandler(batch, env) {
 }
 
 // ── 1. Fetcher (Consumes FEED_QUEUE) ─────────────────────────────────────────
-async function processFeeds(messages, env) {
+async function processFeeds(messages, env, ctx) {
   const config = loadConfig();
   const startTime = Date.now();
 
@@ -294,257 +443,280 @@ async function processFeeds(messages, env) {
     dedupedJobs.push(job);
   }
 
-  // ── BATCH D1 INSERT (eliminates per-job queries) ────────────────────────
-  const { inserted: newJobs, duplicates: d1Dupes } = await batchInsertJobs(
-    env.DB,
-    dedupedJobs,
-  );
-  const newlyInsertedCount = newJobs.length;
-  const duplicateCount = inMemoryDupes + d1Dupes;
+  // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
+  ctx.waitUntil(
+    (async () => {
+      // ── BATCH D1 INSERT (eliminates per-job queries) ────────────────────────
+      const { inserted: newJobs, duplicates: d1Dupes } = await batchInsertJobs(
+        env.DB,
+        dedupedJobs,
+      );
+      const newlyInsertedCount = newJobs.length;
+      const duplicateCount = inMemoryDupes + d1Dupes;
 
-  // ── Track market signals from inserted jobs (aggregated) ────────────────
-  const batchSkillCounts = {};
-  let remoteJobs = 0,
-    hybridJobs = 0,
-    onsiteJobs = 0;
-  let salarySum = 0,
-    salaryCount = 0;
-  const perSourceNewJobs = new Map();
-  const allTerms = [];
+      // ── Track market signals from inserted jobs (aggregated) ────────────────
+      const batchSkillCounts = {};
+      let remoteJobs = 0,
+        hybridJobs = 0,
+        onsiteJobs = 0;
+      let salarySum = 0,
+        salaryCount = 0;
+      const perSourceNewJobs = new Map();
+      const allTerms = [];
 
-  for (const job of newJobs) {
-    // Track per-source yield
-    const jobSourceUrl = job.sourceUrl || "";
-    perSourceNewJobs.set(
-      jobSourceUrl,
-      (perSourceNewJobs.get(jobSourceUrl) || 0) + 1,
-    );
-
-    // Track skill counts
-    if (job.matchedTerms?.length) {
-      for (const term of job.matchedTerms) {
-        batchSkillCounts[term] = (batchSkillCounts[term] || 0) + 1;
-      }
-      allTerms.push(...job.matchedTerms);
-    }
-
-    // Remote/location detection
-    const jobText =
-      `${job.title || ""} ${job.contentSnippet || ""}`.toLowerCase();
-    if (/\b(remote|wfh|work from home|distributed|anywhere)\b/.test(jobText))
-      remoteJobs++;
-    else if (/\bhybrid\b/.test(jobText)) hybridJobs++;
-    else onsiteJobs++;
-
-    // Salary tracking
-    const salaryMatch = jobText.match(/\$([\d,]+)/g);
-    if (salaryMatch) {
-      const val = parseInt(salaryMatch[0].replace(/[$,]/g, ""), 10);
-      if (val > 1000 && val < 1_000_000) {
-        salarySum += val;
-        salaryCount++;
-      }
-    }
-  }
-
-  // ── Record term frequencies in ONE batch call ───────────────────────────
-  if (allTerms.length > 0) {
-    try {
-      await recordTermFrequencies(env.DB, allTerms);
-    } catch (err) {
-      logger.warn(`[Fetcher] recordTermFrequencies failed: ${err.message}`);
-    }
-  }
-
-  // ── Send new jobs to JOB_QUEUE in chunks ────────────────────────────────
-  // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost.
-  // Issue 4: slimJob() strips heavy text fields to stay under 128KB limit.
-  // Issue 3: withRetry() absorbs Cloudflare Queue rate-limit errors before fallback.
-  const JOB_CHUNK_SIZE = 20;
-  let queueMsgs = 0;
-  let jobQueueSuccess = false;
-  try {
-    const messages = [];
-    for (let i = 0; i < newJobs.length; i += JOB_CHUNK_SIZE) {
-      const slimChunk = newJobs.slice(i, i + JOB_CHUNK_SIZE).map(slimJob);
-      const payload = { jobs: slimChunk };
-
-      // Issue 4: Pre-flight size check — skip gracefully if still over limit
-      const payloadSize = JSON.stringify(payload).length;
-      if (payloadSize > 100_000) {
-        logger.warn(
-          `[Fetcher] JOB_QUEUE chunk too large (${payloadSize} bytes), skipping ${slimChunk.length} jobs to avoid Payload Too Large error.`,
+      for (const job of newJobs) {
+        // Track per-source yield
+        const jobSourceUrl = job.sourceUrl || "";
+        perSourceNewJobs.set(
+          jobSourceUrl,
+          (perSourceNewJobs.get(jobSourceUrl) || 0) + 1,
         );
-        continue;
+
+        // Track skill counts
+        if (job.matchedTerms?.length) {
+          for (const term of job.matchedTerms) {
+            batchSkillCounts[term] = (batchSkillCounts[term] || 0) + 1;
+          }
+          allTerms.push(...job.matchedTerms);
+        }
+
+        // Remote/location detection
+        const jobText =
+          `${job.title || ""} ${job.contentSnippet || ""}`.toLowerCase();
+        if (
+          /\b(remote|wfh|work from home|distributed|anywhere)\b/.test(jobText)
+        )
+          remoteJobs++;
+        else if (/\bhybrid\b/.test(jobText)) hybridJobs++;
+        else onsiteJobs++;
+
+        // Salary tracking
+        const salaryMatch = jobText.match(/\$([\d,]+)/g);
+        if (salaryMatch) {
+          const val = parseInt(salaryMatch[0].replace(/[$,]/g, ""), 10);
+          if (val > 1000 && val < 1_000_000) {
+            salarySum += val;
+            salaryCount++;
+          }
+        }
       }
-      messages.push({ body: payload });
-    }
 
-    // Cloudflare Queues batch size limit is 256KB total.
-    // At ~20KB per message (chunk of 20 jobs), 5 messages is ~100KB per batch.
-    for (let i = 0; i < messages.length; i += 5) {
-      await withRetry(() => env.JOB_QUEUE.sendBatch(messages.slice(i, i + 5)));
-      await sleep(500); // Pace queue sends to avoid Too Many Requests
-    }
+      // ── Record term frequencies in ONE batch call ───────────────────────────
+      if (allTerms.length > 0) {
+        try {
+          await recordTermFrequencies(env.DB, allTerms);
+        } catch (err) {
+          logger.warn(`[Fetcher] recordTermFrequencies failed: ${err.message}`);
+        }
+      }
 
-    queueMsgs = messages.length;
-    if (newJobs.length > 0) {
-      logger.info(
-        `[Fetcher] Sent ${newJobs.length} jobs in ${queueMsgs} queue messages`,
-      );
-    }
-    jobQueueSuccess = true;
-  } catch (err) {
-    logger.error(
-      `[Fetcher] JOB_QUEUE sendBatch failed after retries: ${err.message}. Falling back to direct evaluation.`,
-    );
-  }
-
-  // ── Daily Metrics (ONE aggregated write instead of per-job) ────────────
-  // Write metrics IMMEDIATELY after job processing, BEFORE evaluateJobs fallback.
-  // This ensures metrics are recorded even if the Worker is killed during evaluation.
-  try {
-    await incrementDailyMetrics(env.DB, {
-      sources_scanned: allSources.length,
-      crawl_successes: crawlSuccesses,
-      crawl_failures: crawlFailures,
-      raw_jobs_found: jobs.length,
-      unique_jobs_stored: newlyInsertedCount,
-      duplicates_filtered: duplicateCount,
-      remote_jobs: remoteJobs,
-      hybrid_jobs: hybridJobs,
-      onsite_jobs: onsiteJobs,
-      salary_sum: salarySum,
-      salary_count: salaryCount,
-      worker_invocations: 1,
-      d1_writes: newlyInsertedCount,
-      queue_messages: queueMsgs,
-      skill_counts: batchSkillCounts,
-    });
-  } catch (err) {
-    logger.error(`[Fetcher] Daily metrics (phase 1) failed: ${err.message}`);
-  }
-
-  // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
-  if (!jobQueueSuccess && newJobs.length > 0) {
-    try {
-      const fakeMessages = [{ body: { jobs: newJobs }, ack() {}, retry() {} }];
-      await evaluateJobs(fakeMessages, env);
-      logger.info(
-        `[Fetcher] Direct evaluation completed for ${newJobs.length} jobs`,
-      );
-    } catch (evalErr) {
-      logger.error(
-        `[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`,
-      );
-    }
-  }
-
-  // Source Discovery (Layer 3+4)
-  // Feed job.link URLs into ATS pattern detection AND company_url / employer_website
-  // fields so we can discover ATS boards from company-owned URLs, not just job-board links.
-  let newAts = 0,
-    newDomains = 0;
-  try {
-    // Build a rich URL set: include all available URL fields from each job
-    const urlsForAtsDetection = [];
-    for (const job of jobs) {
-      if (job.link) urlsForAtsDetection.push(job.link);
-      if (job.company_url) urlsForAtsDetection.push(job.company_url);
-      if (job.apply_url) urlsForAtsDetection.push(job.apply_url);
-      if (job.ats_source_url) urlsForAtsDetection.push(job.ats_source_url);
-    }
-
-    const knownUrls = new Set(allSources.map((s) => s.url));
-    const { sources: newSources, domains: discoveredDomains } =
-      detectAtsSourcesWithDomains(urlsForAtsDetection, knownUrls);
-
-    if (newSources.length > 0) {
-      await batchRegisterDiscoveredSources(env.DB, newSources);
-    }
-    newAts = newSources.length;
-    if (newAts > 0)
-      logger.info(`[Discovery] Auto-registered ${newAts} new ATS sources`);
-
-    // Register company domains for career page probing.
-    // Prioritise domains from company_url/apply_url (more likely to be company-owned)
-    // over generic job-board links. Limit to 30 per batch to control D1 writes.
-    const companyDomains = discoveredDomains
-      .filter((d) => {
-        // Prefer domains from non-link fields (already pre-filtered by detectAtsSourcesWithDomains)
-        return (
-          d.domain &&
-          !d.domain.includes("lever.co") &&
-          !d.domain.includes("greenhouse.io")
-        );
-      })
-      .slice(0, 30);
-
-    const domainsToRegister = companyDomains.map((d) => ({
-      domain: d.domain,
-      sourceJobUrl: d.sourceUrl,
-    }));
-
-    if (domainsToRegister.length > 0) {
-      await batchRegisterDomains(env.DB, domainsToRegister);
-    }
-    newDomains = companyDomains.length;
-    if (newDomains > 0)
-      logger.info(
-        `[Discovery] Queued ${newDomains} company domains for career probing`,
-      );
-  } catch (err) {
-    logger.warn(`[Discovery] Source detection failed: ${err.message}`);
-  }
-
-  // Record yield for intelligence layer (with dedup ratio for scoring penalty)
-  for (const fs of feedStats) {
-    if (!fs.error) {
-      const sourceNewJobs = perSourceNewJobs.get(fs.url) || 0;
-      const totalFromSource = fs.count || 0;
-      // Compute duplication ratio: 1.0 = all duplicates, 0.0 = all unique
-      const dupRatio =
-        totalFromSource > 0
-          ? Math.max(0, Math.min(1, 1 - sourceNewJobs / totalFromSource))
-          : 0;
+      // ── Send new jobs to JOB_QUEUE in chunks ────────────────────────────────
+      // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost.
+      // Issue 4: slimJob() strips heavy text fields to stay under 128KB limit.
+      // Issue 3: withRetry() absorbs Cloudflare Queue rate-limit errors before fallback.
+      const JOB_CHUNK_SIZE = 20;
+      let queueMsgs = 0;
+      let jobQueueSuccess = false;
       try {
-        await recordSourceYield(
-          env.DB,
-          fs.url,
-          sourceNewJobs,
-          totalFromSource,
-          dupRatio,
-        );
+        const messages = [];
+        for (let i = 0; i < newJobs.length; i += JOB_CHUNK_SIZE) {
+          const slimChunk = newJobs.slice(i, i + JOB_CHUNK_SIZE).map(slimJob);
+          const payload = { jobs: slimChunk };
+
+          // Issue 4: Pre-flight size check — skip gracefully if still over limit
+          const payloadSize = JSON.stringify(payload).length;
+          if (payloadSize > 100_000) {
+            logger.warn(
+              `[Fetcher] JOB_QUEUE chunk too large (${payloadSize} bytes), skipping ${slimChunk.length} jobs to avoid Payload Too Large error.`,
+            );
+            continue;
+          }
+          messages.push({ body: payload });
+        }
+
+        // Cloudflare Queues batch size limit is 256KB total.
+        // At ~20KB per message (chunk of 20 jobs), 5 messages is ~100KB per batch.
+        for (let i = 0; i < messages.length; i += 5) {
+          await withRetry(() =>
+            env.JOB_QUEUE.sendBatch(messages.slice(i, i + 5)),
+          );
+          await sleep(500); // Pace queue sends to avoid Too Many Requests
+        }
+
+        queueMsgs = messages.length;
+        if (newJobs.length > 0) {
+          logger.info(
+            `[Fetcher] Sent ${newJobs.length} jobs in ${queueMsgs} queue messages`,
+          );
+        }
+        jobQueueSuccess = true;
       } catch (err) {
-        logger.warn(`[Fetcher] recordSourceYield failed: ${err.message}`);
+        logger.error(
+          `[Fetcher] JOB_QUEUE sendBatch failed after retries: ${err.message}. Falling back to direct evaluation.`,
+        );
       }
-    }
-  }
 
-  // ── Daily Metrics (Phase 2: Discovery metrics) ─────────────────────────
-  if (newAts > 0 || newDomains > 0) {
-    try {
-      await incrementDailyMetrics(env.DB, {
-        new_sources_ats: newAts,
-        new_domains_queued: newDomains,
-        d1_writes: newAts,
-      });
-    } catch (err) {
-      logger.error(`[Fetcher] Daily metrics (phase 2) failed: ${err.message}`);
-    }
-  }
+      // ── Daily Metrics (ONE aggregated write instead of per-job) ────────────
+      // Write metrics IMMEDIATELY after job processing, BEFORE evaluateJobs fallback.
+      // This ensures metrics are recorded even if the Worker is killed during evaluation.
+      try {
+        await incrementDailyMetrics(env.DB, {
+          sources_scanned: allSources.length,
+          crawl_successes: crawlSuccesses,
+          crawl_failures: crawlFailures,
+          raw_jobs_found: jobs.length,
+          unique_jobs_stored: newlyInsertedCount,
+          duplicates_filtered: duplicateCount,
+          remote_jobs: remoteJobs,
+          hybrid_jobs: hybridJobs,
+          onsite_jobs: onsiteJobs,
+          salary_sum: salarySum,
+          salary_count: salaryCount,
+          worker_invocations: 1,
+          d1_writes: newlyInsertedCount,
+          queue_messages: queueMsgs,
+          skill_counts: batchSkillCounts,
+        });
+      } catch (err) {
+        logger.error(
+          `[Fetcher] Daily metrics (phase 1) failed: ${err.message}`,
+        );
+      }
 
-  logger.info(
-    `[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`,
+      // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
+      if (!jobQueueSuccess && newJobs.length > 0) {
+        try {
+          const fakeMessages = [
+            { body: { jobs: newJobs }, ack() {}, retry() {} },
+          ];
+          await evaluateJobs(fakeMessages, env, ctx);
+          logger.info(
+            `[Fetcher] Direct evaluation completed for ${newJobs.length} jobs`,
+          );
+        } catch (evalErr) {
+          logger.error(
+            `[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`,
+          );
+        }
+      }
+
+      // Source Discovery (Layer 3+4)
+      // Feed job.link URLs into ATS pattern detection AND company_url / employer_website
+      // fields so we can discover ATS boards from company-owned URLs, not just job-board links.
+      let newAts = 0,
+        newDomains = 0;
+      try {
+        // Build a rich URL set: include all available URL fields from each job
+        const urlsForAtsDetection = [];
+        for (const job of jobs) {
+          if (job.link) urlsForAtsDetection.push(job.link);
+          if (job.company_url) urlsForAtsDetection.push(job.company_url);
+          if (job.apply_url) urlsForAtsDetection.push(job.apply_url);
+          if (job.ats_source_url) urlsForAtsDetection.push(job.ats_source_url);
+        }
+
+        const knownUrls = new Set(allSources.map((s) => s.url));
+        const { sources: newSources, domains: discoveredDomains } =
+          detectAtsSourcesWithDomains(urlsForAtsDetection, knownUrls);
+
+        if (newSources.length > 0) {
+          await batchRegisterDiscoveredSources(env.DB, newSources);
+        }
+        newAts = newSources.length;
+        if (newAts > 0)
+          logger.info(`[Discovery] Auto-registered ${newAts} new ATS sources`);
+
+        // Register company domains for career page probing.
+        // Prioritise domains from company_url/apply_url (more likely to be company-owned)
+        // over generic job-board links. Limit to 30 per batch to control D1 writes.
+        const companyDomains = discoveredDomains
+          .filter((d) => {
+            // Prefer domains from non-link fields (already pre-filtered by detectAtsSourcesWithDomains)
+            return (
+              d.domain &&
+              !d.domain.includes("lever.co") &&
+              !d.domain.includes("greenhouse.io")
+            );
+          })
+          .slice(0, 30);
+
+        const domainsToRegister = companyDomains.map((d) => ({
+          domain: d.domain,
+          sourceJobUrl: d.sourceUrl,
+        }));
+
+        if (domainsToRegister.length > 0) {
+          await batchRegisterDomains(env.DB, domainsToRegister);
+        }
+        newDomains = companyDomains.length;
+        if (newDomains > 0)
+          logger.info(
+            `[Discovery] Queued ${newDomains} company domains for career probing`,
+          );
+      } catch (err) {
+        logger.warn(`[Discovery] Source detection failed: ${err.message}`);
+      }
+
+      // Record yield for intelligence layer (batch D1 writes instead of per-source)
+      const yieldsToBatch = [];
+      for (const fs of feedStats) {
+        if (!fs.error) {
+          const sourceNewJobs = perSourceNewJobs.get(fs.url) || 0;
+          const totalFromSource = fs.count || 0;
+          // Compute duplication ratio: 1.0 = all duplicates, 0.0 = all unique
+          const dupRatio =
+            totalFromSource > 0
+              ? Math.max(0, Math.min(1, 1 - sourceNewJobs / totalFromSource))
+              : 0;
+          yieldsToBatch.push({
+            url: fs.url,
+            newJobCount: sourceNewJobs,
+            totalJobCount: totalFromSource,
+            dupRatio,
+          });
+        }
+      }
+
+      // Batch write all yields in single D1 batch call
+      if (yieldsToBatch.length > 0) {
+        try {
+          await recordSourceYieldsBatch(env.DB, yieldsToBatch);
+          logger.info(
+            `[Fetcher] Batch recorded ${yieldsToBatch.length} source yields`,
+          );
+        } catch (err) {
+          logger.warn(`[Fetcher] Batch yield record failed: ${err.message}`);
+        }
+      }
+
+      // ── Daily Metrics (Phase 2: Discovery metrics) ─────────────────────────
+      if (newAts > 0 || newDomains > 0) {
+        try {
+          await incrementDailyMetrics(env.DB, {
+            new_sources_ats: newAts,
+            new_domains_queued: newDomains,
+            d1_writes: newAts,
+          });
+        } catch (err) {
+          logger.error(
+            `[Fetcher] Daily metrics (phase 2) failed: ${err.message}`,
+          );
+        }
+      }
+
+      logger.info(
+        `[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`,
+      );
+
+      for (const msg of messages) {
+        msg.ack();
+      }
+    })(),
   );
-
-  for (const msg of messages) {
-    msg.ack();
-  }
 }
 
 // ── 2. Evaluator (Consumes JOB_QUEUE) — CPU-optimized ────────────────────────
-async function evaluateJobs(messages, env) {
+async function evaluateJobs(messages, env, ctx) {
   const config = loadConfig();
   const EVAL_START = Date.now();
   // Issue 1: Tightened from 25s→22s to give larger margin before the 30s hard kill
@@ -567,16 +739,27 @@ async function evaluateJobs(messages, env) {
   const globalThreshold = thresholdContext.effective;
 
   // Pre-compute profile embedding ONCE (same config for all jobs/profiles)
+  // OPTIMIZATION: Use cached embedding to avoid regenerating every run
   const profileSpecs = [
     ...(config.searchRules?.mustMatch || []),
     ...(config.searchRules?.niceToHave || []),
   ].join(" ");
-  const profileVector = await generateEmbedding(env.AI, profileSpecs);
-  let aiCallsCount = 1; // Count the profile embedding call
+  const profileVector = await getProfileEmbedding(
+    env.AI,
+    env.SEEN_JOBS,
+    profileSpecs,
+  );
+  let aiCallsCount = profileVector.length > 0 ? 0 : 1; // Only count if we actually called AI
   let alertsQueued = 0;
   let scoreSum = 0;
   let scoreMax = 0;
   let jobsEvaluated = 0;
+
+  // Batch KV writes - collect scores and write once at the end
+  const scoresToBatch = [];
+
+  // Batch D1 writes - collect chunks and insert in one batch at end
+  const chunksToBatch = [];
 
   // Pre-fetch global term frequencies ONCE for all jobs (1 D1 call instead of N)
   const allMustTerms = config.searchRules?.mustMatch || [];
@@ -621,43 +804,54 @@ async function evaluateJobs(messages, env) {
         continue;
       }
 
-      // v4: Chunk the job text and get embeddings
-      const jobTextForAi = `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`;
-      const chunks = chunkTexts(jobTextForAi, 200, 40);
+      // OPTIMIZATION: Quick keyword score to skip AI if job is already strong
+      const quickKeywordScore = computeQuickKeywordScore(job, config);
 
-      const chunkVecs = await embedChunks(
-        env.AI,
-        env.SEEN_JOBS,
-        job.id,
-        chunks,
-      );
-      aiCallsCount++;
+      // Skip AI embedding if keyword score is very high (>75)
+      // The job likely already matches well without semantic analysis
+      const SKIP_AI_THRESHOLD = 75;
+      let chunkVecs = [];
+      let chunks = [];
 
-      // v4: Insert chunk vectors into D1
-      try {
-        const insertStmt = env.DB.prepare(
-          "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
-        );
-        const batch = chunks.map((chunk, idx) =>
-          insertStmt.bind(
-            job.id,
-            chunk,
-            JSON.stringify(chunkVecs[idx] || []),
-            "unknown",
-          ),
-        );
-        if (batch.length > 0) await env.DB.batch(batch);
-      } catch (e) {
-        logger.warn(`[Evaluator] Failed inserting chunks to D1: ${e.message}`);
+      if (quickKeywordScore < SKIP_AI_THRESHOLD) {
+        // v4: Chunk the job text and get embeddings
+        // Optimization: Limit chunks to 5 max to reduce CPU and AI calls
+        const jobTextForAi = `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`;
+        chunks = chunkTexts(jobTextForAi, 200, 40).slice(0, 5);
+
+        chunkVecs = await embedChunks(env.AI, env.SEEN_JOBS, job.id, chunks);
+        aiCallsCount++;
+
+        // v4: Insert chunk vectors into D1 (batched at end instead of per-job)
+        // Store for later batch insert
+        if (chunks.length > 0 && chunkVecs.length > 0) {
+          chunksToBatch.push({
+            jobId: job.id,
+            chunks,
+            chunkVecs,
+          });
+        }
       }
 
-      // v4: RAG Retrieval
-      const ragMatches = await retrieveRelevant(
-        env.DB,
-        profileVector,
-        job.id,
-        5,
-      );
+      // v4: Calculate RAG matches from memory instead of D1 query
+      // This avoids an extra D1 subrequest per job and uses Min-Heap O(N log K)
+      const topKChunks = new TopKChunks(5);
+      for (let i = 0; i < chunks.length; i++) {
+        const vec = chunkVecs[i] || [];
+        if (!vec || vec.length === 0) continue;
+
+        const sim =
+          profileVector && vec.length > 0
+            ? cosineSimilarity(profileVector, vec)
+            : 0;
+        topKChunks.add({
+          text: chunks[i],
+          vec: vec,
+          sim: sim,
+        });
+      }
+
+      const ragMatches = topKChunks.getTop();
 
       const trajectoryFit = 0.5; // v4 stub
 
@@ -682,7 +876,8 @@ async function evaluateJobs(messages, env) {
         scoreResult.breakdown.feedbackBoost = feedbackDelta;
       }
 
-      await recordJobScore(env.SEEN_JOBS, scoreResult.score);
+      // Batch KV write - collect instead of per-job write
+      scoresToBatch.push(scoreResult.score);
 
       for (const profile of activeProfiles) {
         const threshold = profile.notification_threshold || globalThreshold;
@@ -742,31 +937,83 @@ async function evaluateJobs(messages, env) {
     msg.ack();
   }
 
-  // ── Auto-adjust threshold for next run based on this run's match count ──
-  try {
-    await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold, {
-      matchedLastRun: alertsQueued,
-    });
-  } catch (err) {
-    logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`);
-  }
+  // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
+  ctx.waitUntil(
+    (async () => {
+      // Batch write all collected scores to KV (single write instead of per-job)
+      if (scoresToBatch.length > 0) {
+        try {
+          await recordJobScoresBatch(env.SEEN_JOBS, scoresToBatch);
+          logger.info(
+            `[Evaluator] Batch recorded ${scoresToBatch.length} scores to KV`,
+          );
+        } catch (err) {
+          logger.warn(`[Evaluator] Batch KV write failed: ${err.message}`);
+        }
+      }
 
-  // ── Daily Metrics ──────────────────────────────────────────────────────
-  try {
-    await incrementDailyMetrics(env.DB, {
-      ai_calls: aiCallsCount,
-      worker_invocations: 1,
-      queue_messages: alertsQueued,
-      score_sum: scoreSum,
-      score_max: scoreMax,
-    });
-  } catch (err) {
-    logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
-  }
+      // Batch write all collected job chunks to D1 (single batch instead of per-job)
+      if (chunksToBatch.length > 0) {
+        try {
+          const insertStmt = env.DB.prepare(
+            "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
+          );
+          const allChunks = [];
+          for (const jobData of chunksToBatch) {
+            for (let i = 0; i < jobData.chunks.length; i++) {
+              allChunks.push(
+                insertStmt.bind(
+                  jobData.jobId,
+                  jobData.chunks[i],
+                  JSON.stringify(jobData.chunkVecs[i] || []),
+                  "unknown",
+                ),
+              );
+            }
+          }
+          // Batch in chunks of 40 (D1 limit)
+          for (let i = 0; i < allChunks.length; i += 40) {
+            await env.DB.batch(allChunks.slice(i, i + 40));
+          }
+          logger.info(
+            `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
+          );
+        } catch (err) {
+          logger.warn(`[Evaluator] Batch chunk insert failed: ${err.message}`);
+        }
+      }
+
+      // ── Auto-adjust threshold for next run based on this run's match count ──
+      try {
+        await getEffectiveThreshold(
+          env.SEEN_JOBS,
+          config.notificationThreshold,
+          {
+            matchedLastRun: alertsQueued,
+          },
+        );
+      } catch (err) {
+        logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`);
+      }
+
+      // ── Daily Metrics ──────────────────────────────────────────────────────
+      try {
+        await incrementDailyMetrics(env.DB, {
+          ai_calls: aiCallsCount,
+          worker_invocations: 1,
+          queue_messages: alertsQueued,
+          score_sum: scoreSum,
+          score_max: scoreMax,
+        });
+      } catch (err) {
+        logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
+      }
+    })(),
+  );
 }
 
 // ── 3. Sender (Consumes ALERT_QUEUE) ──────────────────────────────────────────
-async function sendAlerts(messages, env) {
+async function sendAlerts(messages, env, ctx) {
   const config = loadConfig();
   let sentCount = 0;
   let failedCount = 0;
@@ -1253,7 +1500,7 @@ export default {
    */
   async queue(batch, env, ctx) {
     try {
-      await queueHandler(batch, env);
+      await queueHandler(batch, env, ctx);
     } catch (err) {
       logger.error(
         `[Queue] Unhandled error in queue="${batch.queue}": ${err.message}`,

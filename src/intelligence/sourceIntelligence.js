@@ -275,21 +275,81 @@ export async function recordSourceYield(db, url, newJobCount, totalJobCount, dup
 }
 
 /**
+ * Batch record source yields to reduce D1 round trips.
+ * Takes an array of { url, newJobCount, totalJobCount, dupRatio } objects.
+ * 
+ * @param {D1Database} db
+ * @param {Array<{url: string, newJobCount: number, totalJobCount: number, dupRatio?: number}>} yields
+ */
+export async function recordSourceYieldsBatch(db, yields) {
+    if (!yields || yields.length === 0) return;
+    
+    try {
+        const stmts = yields.map(y => 
+            db.prepare(
+                `UPDATE source_registry
+                 SET total_jobs_found = total_jobs_found + ?,
+                     avg_job_count = COALESCE(avg_job_count, 0) * 0.7 + ? * 0.3,
+                     last_new_job_at = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_new_job_at END,
+                     posting_frequency = COALESCE(posting_frequency, 0) * 0.8 + ? * 0.2,
+                     dup_ratio = COALESCE(dup_ratio, 0) * 0.6 + ? * 0.4
+                 WHERE url = ?`
+            ).bind(
+                y.newJobCount, 
+                y.totalJobCount, 
+                y.newJobCount, 
+                y.newJobCount, 
+                y.dupRatio || 0, 
+                y.url
+            )
+        );
+        
+        // Execute in batches of 40 (D1 batch limit)
+        for (let i = 0; i < stmts.length; i += 40) {
+            await db.batch(stmts.slice(i, i + 40));
+        }
+    } catch (err) {
+        logger.warn(`[Intelligence] Batch yield record failed: ${err.message}`);
+    }
+}
+
+/**
+ * In-memory cycle counter for fast access.
+ * Only persists to KV every N cycles.
+ */
+let _inMemoryCycle = 0;
+const CYCLE_WRITE_INTERVAL = 10; // Only write to KV every 10 cycles
+
+/**
  * Get the current cycle number from KV, incrementing it.
+ * OPTIMIZATION: Uses in-memory counter, only writes to KV every 10 cycles.
  *
  * @param {KVNamespace} kv
  * @returns {Promise<number>}
  */
 export async function getAndIncrementCycle(kv) {
-    try {
-        const raw = await kv.get('__cycle_number');
-        const current = parseInt(raw || '0', 10);
-        const next = current + 1;
-        await kv.put('__cycle_number', String(next));
-        return next;
-    } catch {
-        return 1;
+    // Try to load from KV on first call (cold start)
+    if (_inMemoryCycle === 0 && kv) {
+        try {
+            const raw = await kv.get('__cycle_number');
+            _inMemoryCycle = parseInt(raw || '0', 10);
+        } catch {
+            _inMemoryCycle = 0;
+        }
     }
+    
+    _inMemoryCycle++;
+    
+    // Only write to KV every N cycles to reduce writes
+    if (kv && _inMemoryCycle % CYCLE_WRITE_INTERVAL === 0) {
+        try {
+            await kv.put('__cycle_number', String(_inMemoryCycle));
+        } catch {
+            // Ignore KV errors
+        }
+    }
+    
+    return _inMemoryCycle;
 }
 
 // ── Hiring Velocity Surge Detection ─────────────────────────────────────────

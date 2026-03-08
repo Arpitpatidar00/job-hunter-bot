@@ -58,6 +58,8 @@ import {
   FRONTEND_TITLE_REGEX,
 } from "./skills.js";
 
+import { getGlobalMatcher } from "./fastMatcher.js";
+
 // ── Score Labels ─────────────────────────────────────────────────────────────
 
 /**
@@ -382,6 +384,10 @@ export function scoreJob(
   // Pre-tokenize once — used for TF-IDF and fuzzy matching
   const tokens = text.split(/\s+/).filter(Boolean);
 
+  const matcher = getGlobalMatcher(config);
+  const textScanResult = matcher.scan(text);
+  const titleScanResult = matcher.scan(titleText);
+
   const {
     searchRules = {},
     targetRoles = [],
@@ -428,49 +434,35 @@ export function scoreJob(
   const features = { experience, salaryUSD, remoteType, seniority };
 
   // ── 1. Exclusion check  ──────────────────────────────────────────────────
-  // FIX: check both title AND body (not just body)
-  const excludeList = expandWithSynonyms(searchRules.exclude || [], synonyms);
-  for (const ex of excludeList) {
-    if (!ex) continue;
-    try {
-      if (new RegExp(`\\b${escapeRegex(ex)}\\b`, "i").test(text)) {
-        // FIX: log exclusion reason (was silently returning 0)
-        const isDebug = _scoreDebugCount < 10;
-        if (isDebug) {
-          _scoreDebugCount++;
-          const jobLabel = `"${(item.title || "untitled").slice(0, 60)}" @ ${item.company || "unknown"}`;
-          import("../core/logger.js")
-            .then(({ default: logger }) =>
-              logger.debug(
-                `[Scoring] EXCLUDED: ${jobLabel} — matched exclude term "${ex}"`,
-              ),
-            )
-            .catch(() => {});
-        }
-        return _excluded([], features, `Excluded: "${ex}" found in job`);
-      }
-    } catch {
-      /* regex build failed — skip this term */
+  const excludeMatches = textScanResult.matched.filter(
+    (m) => m.category === "exclude",
+  );
+  if (excludeMatches.length > 0) {
+    const ex = excludeMatches[0].original;
+    // FIX: log exclusion reason (was silently returning 0)
+    const isDebug = _scoreDebugCount < 10;
+    if (isDebug) {
+      _scoreDebugCount++;
+      const jobLabel = `"${(item.title || "untitled").slice(0, 60)}" @ ${item.company || "unknown"}`;
+      import("../core/logger.js")
+        .then(({ default: logger }) =>
+          logger.debug(
+            `[Scoring] EXCLUDED: ${jobLabel} — matched exclude term "${ex}"`,
+          ),
+        )
+        .catch(() => {});
     }
+    return _excluded([], features, `Excluded: "${ex}" found in job`);
   }
 
   // ── 2. Title match ───────────────────────────────────────────────────────
   // FIX: graduated scoring — more hits = higher title score (not all-or-nothing)
-  // FIX: word-boundary regex instead of string.includes()
-  const expandedRoles = expandWithSynonyms(targetRoles, synonyms);
-  let titleHits = 0;
-  const titleHitNames = [];
-  for (const role of expandedRoles) {
-    if (!role) continue;
-    try {
-      if (new RegExp(`\\b${escapeRegex(role)}\\b`, "i").test(titleText)) {
-        titleHits++;
-        titleHitNames.push(role);
-      }
-    } catch {
-      /* skip */
-    }
-  }
+  const titleMatches = titleScanResult.matched.filter(
+    (m) => m.category === "targetRole",
+  );
+  let titleHits = titleMatches.length;
+  const titleHitNames = titleMatches.map((m) => m.original);
+
   // Graduated: 1 hit = 60%, 2 hits = 80%, 3+ hits = 100% of title weight
   const titlePct =
     titleHits === 0 ? 0 : titleHits === 1 ? 0.6 : titleHits === 2 ? 0.8 : 1.0;
@@ -486,21 +478,26 @@ export function scoreJob(
   const mustMatchList = searchRules.mustMatch || [];
   const shouldMatchList = searchRules.shouldMatch || [];
 
+  const mustMatches = textScanResult.matched.filter(
+    (m) => m.category === "mustMatch",
+  );
+  const shouldMatches = textScanResult.matched.filter(
+    (m) => m.category === "shouldMatch",
+  );
+
   let mustHits = 0;
-  for (const kw of mustMatchList) {
-    const kl = kw.toLowerCase().trim();
-    if (!kl || matchedSkillsSet.has(kl)) continue;
-    if (keywordMatchesText(kl, text, fuzzyThreshold, synonyms)) {
+  for (const m of mustMatches) {
+    const kl = m.original.toLowerCase().trim();
+    if (!matchedSkillsSet.has(kl)) {
       mustHits++;
       matchedSkillsSet.add(kl);
     }
   }
 
   let shouldHits = 0;
-  for (const kw of shouldMatchList) {
-    const kl = kw.toLowerCase().trim();
-    if (!kl || matchedSkillsSet.has(kl)) continue;
-    if (keywordMatchesText(kl, text, fuzzyThreshold, synonyms)) {
+  for (const m of shouldMatches) {
+    const kl = m.original.toLowerCase().trim();
+    if (!matchedSkillsSet.has(kl)) {
       shouldHits++;
       matchedSkillsSet.add(kl);
     }
@@ -528,12 +525,14 @@ export function scoreJob(
 
   // ── 4. Tech stack / nice-to-have ─────────────────────────────────────────
   const niceToHaveList = searchRules.niceToHave || [];
+  const niceMatches = textScanResult.matched.filter(
+    (m) => m.category === "niceToHave",
+  );
   let niceHits = 0;
   const niceMatched = [];
-  for (const kw of niceToHaveList) {
-    const kl = kw.toLowerCase().trim();
-    if (!kl || matchedSkillsSet.has(kl)) continue;
-    if (keywordMatchesText(kl, text, fuzzyThreshold, synonyms)) {
+  for (const m of niceMatches) {
+    const kl = m.original.toLowerCase().trim();
+    if (!matchedSkillsSet.has(kl)) {
       niceHits++;
       matchedSkillsSet.add(kl);
       niceMatched.push(kl);
@@ -549,30 +548,12 @@ export function scoreJob(
     );
 
   // ── 5. Location match ────────────────────────────────────────────────────
-  // FIX: word-boundary regex — prevents false positives like "India" in "Individual"
-  const locationTerms = [
-    ...(locationKeywords || []),
-    ...(filters.workPreference || []),
-    ...(filters.locations || []),
-  ];
-  const locLower = [
-    ...new Set(
-      locationTerms.map((l) => l.toLowerCase().trim()).filter(Boolean),
-    ),
-  ];
-  let locationHit = false;
-  let locationHitTerm = "";
-  for (const loc of locLower) {
-    try {
-      if (new RegExp(`\\b${escapeRegex(loc)}\\b`, "i").test(text)) {
-        locationHit = true;
-        locationHitTerm = loc;
-        break;
-      }
-    } catch {
-      /* skip */
-    }
-  }
+  const locationMatches = textScanResult.matched.filter(
+    (m) => m.category === "location",
+  );
+  let locationHit = locationMatches.length > 0;
+  let locationHitTerm = locationHit ? locationMatches[0].original : "";
+
   const locationScore = locationHit ? w.locationMatch : 0;
   baseScore += locationScore;
   if (locationHit)
@@ -710,39 +691,36 @@ export function scoreJob(
   // FIX: Non-JS penalty — check BOTH title AND body (not just title)
   // FIX: triggers even with mustHits > 0 (if title has non-JS as primary lang)
   let nonJsPenaltyApplied = false;
-  for (const lang of NON_JS_STACKS) {
-    const langTrimmed = lang.trim();
-    try {
-      const isInTitle = new RegExp(
-        `\\b${escapeRegex(langTrimmed)}\\b`,
-        "i",
-      ).test(titleText);
-      const isInBody = new RegExp(
-        `\\b${escapeRegex(langTrimmed)}\\b`,
-        "i",
-      ).test(text);
-      // Apply penalty if: appears in title, OR appears in body AND mustHits === 0
-      if (isInTitle || (isInBody && mustHits === 0)) {
-        if (trajectoryFit > 0.8) {
-          addReason(
-            `Trajectory override: Ignored Non-JS stack "${langTrimmed}" penalty`,
-          );
-        } else {
-          penalty += scoringPenalties.nonJsStack ?? -15;
-          addReason(`Penalty: Non-JS stack "${langTrimmed}" detected`);
-          nonJsPenaltyApplied = true;
-        }
-        break;
-      }
-    } catch {
-      /* skip */
+  const nonJsTitleMatches = titleScanResult.matched.filter(
+    (m) => m.category === "nonJsStack",
+  );
+  const nonJsBodyMatches = textScanResult.matched.filter(
+    (m) => m.category === "nonJsStack",
+  );
+
+  let penaltyLang = null;
+  if (nonJsTitleMatches.length > 0) {
+    penaltyLang = nonJsTitleMatches[0].original;
+  } else if (nonJsBodyMatches.length > 0 && mustHits === 0) {
+    penaltyLang = nonJsBodyMatches[0].original;
+  }
+
+  if (penaltyLang) {
+    if (trajectoryFit > 0.8) {
+      addReason(
+        `Trajectory override: Ignored Non-JS stack "${penaltyLang}" penalty`,
+      );
+    } else {
+      penalty += scoringPenalties.nonJsStack ?? -15;
+      addReason(`Penalty: Non-JS stack "${penaltyLang}" detected`);
+      nonJsPenaltyApplied = true;
     }
   }
 
   // FIX: Frontend-only penalty — stricter: requires title match + no backend AND no must-match
   if (!nonJsPenaltyApplied) {
-    const hasFE = FRONTEND_KEYWORDS.some((k) => text.includes(k));
-    const hasBE = BACKEND_KEYWORDS.some((k) => text.includes(k));
+    const hasFE = textScanResult.matched.some((m) => m.category === "frontend");
+    const hasBE = textScanResult.matched.some((m) => m.category === "backend");
     const feTitleMatch = FRONTEND_TITLE_REGEX.test(titleText);
     if (hasFE && !hasBE && feTitleMatch && mustHits === 0) {
       penalty += scoringPenalties.frontendOnlyNoBackend ?? -5;

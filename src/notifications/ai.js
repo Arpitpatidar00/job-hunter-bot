@@ -37,13 +37,26 @@ function sleep(ms) {
  *
  * Issue 5: Returns [] immediately if the per-invocation subrequest budget is exhausted.
  * Issue 6: Retries up to 2 times (1s, 2s delay) for transient "model temporarily unavailable" errors.
+ * Issue 7: Caches profile embeddings in KV to avoid regenerating on every run.
  *
  * @param {import('@cloudflare/workers-types').Ai} aiBinding
  * @param {string} text - The input text (job description or profile specs)
  * @returns {Promise<number[]>} The vector embedding, or [] on failure / budget exceeded
  */
-export async function generateEmbedding(aiBinding, text) {
+export async function generateEmbedding(aiBinding, text, kvBinding = null, cacheKey = null) {
   if (!aiBinding || !text) return [];
+
+  // OPTIMIZATION: Check KV cache first for profile embeddings
+  if (kvBinding && cacheKey) {
+    try {
+      const cached = await kvBinding.get(`embed:${cacheKey}`);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    } catch {
+      // Cache miss, generate new embedding
+    }
+  }
 
   // Issue 5: Enforce subrequest budget
   if (_aiCallCount >= MAX_AI_CALLS_PER_INVOCATION) {
@@ -93,6 +106,63 @@ export async function generateEmbedding(aiBinding, text) {
   }
 
   return [];
+}
+
+/**
+ * Get profile embedding with caching.
+ * OPTIMIZATION: Caches profile embedding in KV for 1 hour to avoid regenerating.
+ * 
+ * @param {import('@cloudflare/workers-types').Ai} aiBinding
+ * @param {import('@cloudflare/workers-types').KVNamespace} kvBinding
+ * @param {string} profileSpecs - Profile search rules text
+ * @returns {Promise<number[]>}
+ */
+export async function getProfileEmbedding(aiBinding, kvBinding, profileSpecs) {
+  if (!profileSpecs) return [];
+  
+  // Create cache key from profile specs hash
+  const cacheKey = `profile:${simpleHash(profileSpecs)}`;
+  
+  // Try cache first
+  if (kvBinding) {
+    try {
+      const cached = await kvBinding.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    } catch {
+      // Cache miss
+    }
+  }
+  
+  // Generate new embedding
+  const embedding = await generateEmbedding(aiBinding, profileSpecs);
+  
+  // Cache for 1 hour
+  if (embedding.length > 0 && kvBinding) {
+    try {
+      await kvBinding.put(cacheKey, JSON.stringify(embedding), { 
+        expirationTtl: 3600 
+      });
+    } catch {
+      // Ignore cache write errors
+    }
+  }
+  
+  return embedding;
+}
+
+/**
+ * Simple hash function for cache keys
+ */
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 /**

@@ -14,19 +14,19 @@
  * @throws {Error} If all retries are exhausted.
  */
 export async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
-    let lastError;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            lastError = err;
-            if (attempt < maxRetries) {
-                const delay = baseDelay * Math.pow(2, attempt - 1);
-                await new Promise((resolve) => setTimeout(resolve, delay));
-            }
-        }
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
-    throw lastError;
+  }
+  throw lastError;
 }
 
 /**
@@ -35,14 +35,14 @@ export async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
  * @returns {Date|null} Parsed Date or null if invalid.
  */
 export function parseDate(dateStr) {
-    if (!dateStr) return null;
+  if (!dateStr) return null;
 
-    // Try native Date constructor (handles ISO 8601 and RFC 2822 which are the RSS formats)
-    const d = new Date(dateStr);
-    if (!isNaN(d.getTime())) return d;
+  // Try native Date constructor (handles ISO 8601 and RFC 2822 which are the RSS formats)
+  const d = new Date(dateStr);
+  if (!isNaN(d.getTime())) return d;
 
-    console.warn(`[WARN] Could not parse date: "${dateStr}"`);
-    return null;
+  console.warn(`[WARN] Could not parse date: "${dateStr}"`);
+  return null;
 }
 
 /**
@@ -51,17 +51,17 @@ export function parseDate(dateStr) {
  * @returns {string} Clean plain text.
  */
 export function sanitizeText(html) {
-    if (!html) return '';
-    return html
-        .replace(/<[^>]*>/g, ' ')        // Remove HTML tags
-        .replace(/&nbsp;/gi, ' ')         // Replace &nbsp;
-        .replace(/&amp;/gi, '&')          // Decode &amp;
-        .replace(/&lt;/gi, '<')           // Decode &lt;
-        .replace(/&gt;/gi, '>')           // Decode &gt;
-        .replace(/&quot;/gi, '"')         // Decode &quot;
-        .replace(/&#39;/gi, "'")          // Decode &#39;
-        .replace(/\s+/g, ' ')            // Collapse whitespace
-        .trim();
+  if (!html) return "";
+  return html
+    .replace(/<[^>]*>/g, " ") // Remove HTML tags
+    .replace(/&nbsp;/gi, " ") // Replace &nbsp;
+    .replace(/&amp;/gi, "&") // Decode &amp;
+    .replace(/&lt;/gi, "<") // Decode &lt;
+    .replace(/&gt;/gi, ">") // Decode &gt;
+    .replace(/&quot;/gi, '"') // Decode &quot;
+    .replace(/&#39;/gi, "'") // Decode &#39;
+    .replace(/\s+/g, " ") // Collapse whitespace
+    .trim();
 }
 
 /**
@@ -70,7 +70,7 @@ export function sanitizeText(html) {
  * @returns {string} Escaped string.
  */
 export function escapeRegex(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -81,29 +81,29 @@ export function escapeRegex(str) {
  * @returns {number} Similarity score between 0 and 1.
  */
 export function compareTwoStrings(a, b) {
-    a = a.toLowerCase().replace(/\s+/g, '');
-    b = b.toLowerCase().replace(/\s+/g, '');
+  a = a.toLowerCase().replace(/\s+/g, "");
+  b = b.toLowerCase().replace(/\s+/g, "");
 
-    if (a === b) return 1;
-    if (a.length < 2 || b.length < 2) return 0;
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
 
-    const bigramsA = new Map();
-    for (let i = 0; i < a.length - 1; i++) {
-        const bigram = a.substring(i, i + 2);
-        bigramsA.set(bigram, (bigramsA.get(bigram) || 0) + 1);
+  const bigramsA = new Map();
+  for (let i = 0; i < a.length - 1; i++) {
+    const bigram = a.substring(i, i + 2);
+    bigramsA.set(bigram, (bigramsA.get(bigram) || 0) + 1);
+  }
+
+  let intersectionSize = 0;
+  for (let i = 0; i < b.length - 1; i++) {
+    const bigram = b.substring(i, i + 2);
+    const count = bigramsA.get(bigram) || 0;
+    if (count > 0) {
+      bigramsA.set(bigram, count - 1);
+      intersectionSize++;
     }
+  }
 
-    let intersectionSize = 0;
-    for (let i = 0; i < b.length - 1; i++) {
-        const bigram = b.substring(i, i + 2);
-        const count = bigramsA.get(bigram) || 0;
-        if (count > 0) {
-            bigramsA.set(bigram, count - 1);
-            intersectionSize++;
-        }
-    }
-
-    return (2.0 * intersectionSize) / (a.length - 1 + b.length - 1);
+  return (2.0 * intersectionSize) / (a.length - 1 + b.length - 1);
 }
 
 /**
@@ -113,26 +113,28 @@ export function compareTwoStrings(a, b) {
  * @returns {function} Limiter function that wraps async functions.
  */
 export function pLimit(concurrency) {
-    let activeCount = 0;
-    const queue = [];
+  let activeCount = 0;
+  const queue = [];
 
-    function next() {
-        if (queue.length > 0 && activeCount < concurrency) {
-            activeCount++;
-            const { fn, resolve, reject } = queue.shift();
-            fn().then(resolve, reject).finally(() => {
-                activeCount--;
-                next();
-            });
-        }
-    }
-
-    return function limit(fn) {
-        return new Promise((resolve, reject) => {
-            queue.push({ fn, resolve, reject });
-            next();
+  function next() {
+    if (queue.length > 0 && activeCount < concurrency) {
+      activeCount++;
+      const { fn, resolve, reject } = queue.shift();
+      fn()
+        .then(resolve, reject)
+        .finally(() => {
+          activeCount--;
+          next();
         });
-    };
+    }
+  }
+
+  return function limit(fn) {
+    return new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      next();
+    });
+  };
 }
 
 /**
@@ -142,22 +144,26 @@ export function pLimit(concurrency) {
  * @returns {{ min: number, max: number } | null} Min/max years or null if not found.
  */
 export function parseExperienceYears(text) {
-    if (!text) return null;
+  if (!text) return null;
 
-    // Patterns: "2-5 years", "2 to 5 years", "2–5 years"
-    const rangeMatch = text.match(/([1-9]\d?)\s*(?:[-–to]+)\s*([1-9]\d?)\s+years?/i);
-    if (rangeMatch) {
-        return { min: parseInt(rangeMatch[1]), max: parseInt(rangeMatch[2]) };
-    }
+  // Patterns: "2-5 years", "2 to 5 years", "2–5 years"
+  const rangeMatch = text.match(
+    /([1-9]\d?)\s*(?:[-–to]+)\s*([1-9]\d?)\s+years?/i,
+  );
+  if (rangeMatch) {
+    return { min: parseInt(rangeMatch[1]), max: parseInt(rangeMatch[2]) };
+  }
 
-    // Patterns: "2+ years", "at least 3 years", "minimum 2 years", "2 years"
-    const singleMatch = text.match(/(?:at\s+least\s+|minimum\s+|min\.?\s+)?([1-9]\d?)\+?\s+years?/i);
-    if (singleMatch) {
-        const min = parseInt(singleMatch[1]);
-        return { min, max: null };
-    }
+  // Patterns: "2+ years", "at least 3 years", "minimum 2 years", "2 years"
+  const singleMatch = text.match(
+    /(?:at\s+least\s+|minimum\s+|min\.?\s+)?([1-9]\d?)\+?\s+years?/i,
+  );
+  if (singleMatch) {
+    const min = parseInt(singleMatch[1]);
+    return { min, max: null };
+  }
 
-    return null;
+  return null;
 }
 
 /**
@@ -167,32 +173,67 @@ export function parseExperienceYears(text) {
  * @returns {{ min: number, max: number, currency: string } | null}
  */
 export function extractSalaryUSD(text) {
-    if (!text) return null;
+  if (!text) return null;
 
-    // INR LPA (Lakhs Per Annum) → USD (approx 1 LPA = ~1200 USD)
-    const lpaMatch = text.match(/([\d.]+)\s*[-–to]*\s*([\d.]+)?\s*(?:lpa|lakhs?\s+per\s+annum)/i);
-    if (lpaMatch) {
-        const min = Math.round(parseFloat(lpaMatch[1]) * 1200);
-        const max = lpaMatch[2] ? Math.round(parseFloat(lpaMatch[2]) * 1200) : min;
-        return { min, max, currency: 'INR' };
+  // INR LPA (Lakhs Per Annum) → USD (approx 1 LPA = ~1200 USD)
+  const lpaMatch = text.match(
+    /([\d.]+)\s*[-–to]*\s*([\d.]+)?\s*(?:lpa|lakhs?\s+per\s+annum)/i,
+  );
+  if (lpaMatch) {
+    const min = Math.round(parseFloat(lpaMatch[1]) * 1200);
+    const max = lpaMatch[2] ? Math.round(parseFloat(lpaMatch[2]) * 1200) : min;
+    return { min, max, currency: "INR" };
+  }
+
+  // USD/EUR/GBP patterns: $80k, $80,000, €70k-90k, $50/hr, $5k/mo
+  const currencyMap = { $: 1, "€": 1.08, "£": 1.27 };
+  const salaryRegex =
+    /([\$€£]?)\s*([\d,]+(?:\.\d+)?)(k?)(?:\s*[-–to]+\s*[\$€£]?\s*([\d,]+(?:\.\d+)?)(k?))?\s*(usd|eur|gbp|per\s+year|\/yr|p\.?a\.?|annually|\/hr|per\s+hour|\/mo|\/month|per\s+month|\/wk|\/week|per\s+week)?/i;
+
+  const match = text.match(salaryRegex);
+  if (match) {
+    const sym = match[1] || "$";
+    const rate = currencyMap[sym] || 1;
+
+    let rawMin = parseFloat(match[2].replace(/,/g, "")) * (match[3] ? 1000 : 1);
+    let rawMax = match[4]
+      ? parseFloat(match[4].replace(/,/g, "")) * (match[5] ? 1000 : 1)
+      : rawMin;
+
+    const periodStr = (match[6] || "").toLowerCase();
+    let multiplier = 1;
+
+    if (periodStr.includes("hr") || periodStr.includes("hour")) {
+      multiplier = 2000; // 40h/wk * 50wks
+    } else if (periodStr.includes("mo") || periodStr.includes("month")) {
+      multiplier = 12;
+    } else if (periodStr.includes("wk") || periodStr.includes("week")) {
+      multiplier = 50;
+    } else {
+      // Predict based on value if no explicit period
+      if (rawMax > 0 && rawMax < 300) {
+        multiplier = 2000; // Likely hourly
+      } else if (rawMax >= 300 && rawMax < 4000) {
+        multiplier = 50; // Likely weekly
+      } else if (rawMax >= 4000 && rawMax <= 15000) {
+        multiplier = 12; // Likely monthly
+      } // Else assume annual
     }
 
-    // USD/EUR/GBP patterns: $80k, $80,000, €70k-90k
-    const currencyMap = { '$': 1, '€': 1.08, '£': 1.27 };
-    const rangeMatch = text.match(/([\$€£]?)\s*([\d,]+(?:\.\d+)?)(k?)\s*[-–to]+\s*[\$€£]?\s*([\d,]+(?:\.\d+)?)(k?)\s*(?:usd|eur|gbp|per\s+year|\/yr|p\.?a\.?|annually)?/i);
-    if (rangeMatch) {
-        const sym = rangeMatch[1] || '$';
-        const rate = currencyMap[sym] || 1;
-        const rawMin = parseFloat(rangeMatch[2].replace(/,/g, '')) * (rangeMatch[3] ? 1000 : 1);
-        const rawMax = parseFloat(rangeMatch[4].replace(/,/g, '')) * (rangeMatch[5] ? 1000 : 1);
-        // Sanity check: yearly salary
-        if (rawMin >= 100 && rawMax >= rawMin) {
-            const adjust = rawMin < 1000 ? 1000 : 1; // treat sub-1000 as monthly
-            return { min: Math.round(rawMin * rate * adjust), max: Math.round(rawMax * rate * adjust), currency: sym };
-        }
-    }
+    rawMin *= multiplier;
+    rawMax *= multiplier;
 
-    return null;
+    // Sanity check: yearly salary makes sense between 10k and 1.5M
+    if (rawMax >= 10000 && rawMin <= 1500000) {
+      return {
+        min: Math.round(rawMin * rate),
+        max: Math.round(rawMax * rate),
+        currency: sym,
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -201,18 +242,34 @@ export function extractSalaryUSD(text) {
  * @returns {'remote' | 'hybrid' | 'onsite' | 'unknown'}
  */
 export function detectRemoteType(text) {
-    if (!text) return 'unknown';
-    const t = text.toLowerCase();
+  if (!text) return "unknown";
+  const t = text.toLowerCase();
 
-    // Hybrid signals
-    if (/\bhybrid\b|\bhybrid-remote\b|\b\d+\s+days?\s+(?:in|from)\s+office\b/.test(t)) return 'hybrid';
+  // Hybrid signals
+  if (
+    /\bhybrid\b|\bhybrid-remote\b|\b\d+\s+days?\s+(?:in|from)\s+office\b/.test(
+      t,
+    )
+  )
+    return "hybrid";
 
-    // Remote signals
-    if (/\bfully\s+remote\b|\b100%\s+remote\b|\bremote[-\s]?first\b|\bwork\s+from\s+(?:home|anywhere)\b|\bwfh\b|\bdistributed\b/.test(t)) return 'remote';
-    if (/\bremote\b/.test(t) && !/\bno\s+remote\b|\bremote\s+not\b/.test(t)) return 'remote';
+  // Remote signals
+  if (
+    /\bfully\s+remote\b|\b100%\s+remote\b|\bremote[-\s]?first\b|\bwork\s+from\s+(?:home|anywhere)\b|\bwfh\b|\bdistributed\b/.test(
+      t,
+    )
+  )
+    return "remote";
+  if (/\bremote\b/.test(t) && !/\bno\s+remote\b|\bremote\s+not\b/.test(t))
+    return "remote";
 
-    // Onsite signals
-    if (/\bon[-\s]?site\b|\bin[-\s]?office\b|\bin[-\s]?person\b|\bno\s+remote\b/.test(t)) return 'onsite';
+  // Onsite signals
+  if (
+    /\bon[-\s]?site\b|\bin[-\s]?office\b|\bin[-\s]?person\b|\bno\s+remote\b/.test(
+      t,
+    )
+  )
+    return "onsite";
 
-    return 'unknown';
+  return "unknown";
 }

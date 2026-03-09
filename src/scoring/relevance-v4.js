@@ -385,8 +385,21 @@ export function scoreJob(
   const tokens = text.split(/\s+/).filter(Boolean);
 
   const matcher = getGlobalMatcher(config);
-  const textScanResult = matcher.scan(text);
-  const titleScanResult = matcher.scan(titleText);
+  let textScanResult = { score: 0, matched: [], matchedCategories: {} };
+  let titleScanResult = { score: 0, matched: [], matchedCategories: {} };
+
+  try {
+    textScanResult = matcher.scan(text);
+    titleScanResult = matcher.scan(titleText);
+  } catch (err) {
+    import("../core/logger.js")
+      .then(({ default: logger }) =>
+        logger.error(`[Scoring] FastMatcher scan failed: ${err.message}`, {
+          stack: err.stack,
+        }),
+      )
+      .catch(() => {});
+  }
 
   const {
     searchRules = {},

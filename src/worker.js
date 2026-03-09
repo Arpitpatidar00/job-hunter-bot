@@ -346,6 +346,7 @@ async function queueHandler(batch, env, ctx) {
 
 // ── 1. Fetcher (Consumes FEED_QUEUE) ─────────────────────────────────────────
 async function processFeeds(messages, env, ctx) {
+  const perfStart = performance.now();
   const config = loadConfig();
   const startTime = Date.now();
 
@@ -443,6 +444,13 @@ async function processFeeds(messages, env, ctx) {
     dedupedJobs.push(job);
   }
 
+  const perfEnd = performance.now();
+  if (env.ENVIRONMENT === "local") {
+    logger.info(
+      `[Local CPU] processFeeds used ${(perfEnd - perfStart).toFixed(2)}ms`,
+    );
+  }
+
   // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
   ctx.waitUntil(
     (async () => {
@@ -534,7 +542,7 @@ async function processFeeds(messages, env, ctx) {
           messages.push({ body: payload });
         }
 
-        // Cloudflare Queues batch size limit is 256KB total.
+        // Cloudflare Queues batch size limit is 256KB total, max 100 messages per sendBatch.
         // At ~20KB per message (chunk of 20 jobs), 5 messages is ~100KB per batch.
         for (let i = 0; i < messages.length; i += 5) {
           await withRetry(() =>
@@ -717,6 +725,7 @@ async function processFeeds(messages, env, ctx) {
 
 // ── 2. Evaluator (Consumes JOB_QUEUE) — CPU-optimized ────────────────────────
 async function evaluateJobs(messages, env, ctx) {
+  const perfStart = performance.now();
   const config = loadConfig();
   const EVAL_START = Date.now();
   // Issue 1: Tightened from 25s→22s to give larger margin before the 30s hard kill
@@ -925,6 +934,10 @@ async function evaluateJobs(messages, env, ctx) {
         newAlertsSent.push({ jobId: job.id, profileId: profile.id });
         sentAlertsSet.add(`${job.id}:${profile.id}`); // in-memory update
         alertsQueued++;
+
+        // Track score distribution histogram in KV (Issue 3: Fix Telemetry & Score Tracking)
+        ctx.waitUntil(trackScoreDistribution(scoreResult.score, env.SEEN_JOBS));
+
         scoreSum += scoreResult.score;
         scoreMax = Math.max(scoreMax, scoreResult.score);
       }
@@ -935,6 +948,13 @@ async function evaluateJobs(messages, env, ctx) {
     }
 
     msg.ack();
+  }
+
+  const perfEnd = performance.now();
+  if (env.ENVIRONMENT === "local") {
+    logger.info(
+      `[Local CPU] evaluateJobs used ${(perfEnd - perfStart).toFixed(2)}ms`,
+    );
   }
 
   // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
@@ -1156,7 +1176,11 @@ async function _scheduledImpl(event, env, ctx) {
         break;
       }
       try {
-        await processFeeds(fakeMessages.slice(i, i + DIRECT_BATCH_SIZE), env);
+        await processFeeds(
+          fakeMessages.slice(i, i + DIRECT_BATCH_SIZE),
+          env,
+          ctx,
+        );
         directProcessed += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
       } catch (err) {
         logger.error(
@@ -1283,7 +1307,7 @@ async function _scheduledImpl(event, env, ctx) {
         env.DB,
         dynamicQueries,
         knownUrls,
-        env.SEEN_JOBS, // ← FIX: pass kv so DDG cooldown is tracked & cleared
+        env.SEEN_JOBS, // Pass KV to track discovery states and limits
         config.searchExpansion?.maxSearchesPerCycle || 8,
         config.searchExpansion?.maxDomainsPerSearch || 20,
       );
@@ -1291,10 +1315,13 @@ async function _scheduledImpl(event, env, ctx) {
         `[SearchExpander] Expansion: ${newAtsSources} ATS sources, ${newDomains} domains queued`,
       );
       if (newAtsSources > 0 || newDomains > 0) {
-        await incrementDailyMetrics(env.DB, {
-          new_sources_search: newAtsSources,
-          new_domains_queued: newDomains,
-        });
+        // Run metrics asynchronously without blocking the queue
+        ctx.waitUntil(
+          incrementDailyMetrics(env.DB, {
+            new_sources_search: newAtsSources,
+            new_domains_queued: newDomains,
+          }),
+        );
       }
     } catch (err) {
       logger.warn(`[SearchExpander] Search expansion failed: ${err.message}`);
@@ -1308,6 +1335,7 @@ async function _scheduledImpl(event, env, ctx) {
   }
 
   // ── Daily Metrics: track cycle ─────────────────────────────────────
+  // ── IMPORTANT: ensure this runs by blocking before cycle end!
   try {
     await incrementDailyMetrics(env.DB, {
       cycles_completed: 1,
@@ -1345,6 +1373,16 @@ async function _scheduledImpl(event, env, ctx) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/test-cron" && env.ENVIRONMENT === "local") {
+      const start = performance.now();
+      await this.scheduled(null, env, ctx);
+      return jsonResponse({
+        status: "ok",
+        message: "Local cron test completed.",
+        time_ms: Math.round(performance.now() - start),
+      });
+    }
 
     if (url.pathname === "/health") {
       const envCheck = validateEnv(env);
@@ -1450,6 +1488,7 @@ export default {
               await processFeeds(
                 fakeMessages.slice(i, i + DIRECT_BATCH_SIZE),
                 env,
+                ctx,
               );
               sent += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
             } catch (err) {

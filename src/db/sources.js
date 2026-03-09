@@ -13,15 +13,20 @@ import logger from "../core/logger.js";
  */
 export async function registerDiscoveredSource(db, source) {
   try {
+    const safeUrl = source.url ? decodeURIComponent(source.url) : null;
+    const safeName = source.name ? decodeURIComponent(source.name) : "";
+
+    if (!safeUrl) return;
+
     await db
       .prepare(
         `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin)
              VALUES (?, ?, ?, ?, ?)`,
       )
       .bind(
-        source.url,
+        safeUrl,
         source.type || "rss",
-        source.name || "",
+        safeName,
         source.enabled !== false ? 1 : 0,
         source.discovery_origin || "manual",
       )
@@ -43,20 +48,22 @@ export async function batchRegisterDiscoveredSources(db, sources) {
   if (!sources || sources.length === 0) return;
 
   try {
-    const stmts = sources.map((source) =>
-      db
+    const stmts = sources.map((source) => {
+      const safeUrl = source.url ? decodeURIComponent(source.url) : null;
+      const safeName = source.name ? decodeURIComponent(source.name) : "";
+      return db
         .prepare(
           `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin)
                  VALUES (?, ?, ?, ?, ?)`,
         )
         .bind(
-          source.url,
+          safeUrl,
           source.type || "rss",
-          source.name || "",
+          safeName,
           source.enabled !== false ? 1 : 0,
           source.discovery_origin || "manual",
-        ),
-    );
+        );
+    });
 
     // Execute in batches of 40 (inside D1 batch limits)
     for (let i = 0; i < stmts.length; i += 40) {

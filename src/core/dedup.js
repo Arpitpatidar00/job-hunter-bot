@@ -156,17 +156,22 @@ export function generateSimHash(text) {
   if (!text || typeof text !== "string") return 0;
 
   let hash = 0x811c9dc5;
-  const words = text
+
+  // Weight the first 10 words heavily (usually title/company based on clusterDuplicates template text)
+  const allWords = text
     .toLowerCase()
     .split(/\W+/)
-    .filter((w) => w.length > 3)
-    .slice(0, 20);
+    .filter((w) => w.length > 2);
+  const words = allWords.slice(0, 50);
 
   for (let i = 0; i < words.length; i++) {
-    for (let j = 0; j < words[i].length; j++) {
-      hash ^= words[i].charCodeAt(j);
-      hash +=
-        (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    const weight = i < 10 ? 3 : 1; // Heavy weight for title/company
+
+    for (let w = 0; w < weight; w++) {
+      for (let j = 0; j < words[i].length; j++) {
+        hash ^= words[i].charCodeAt(j);
+        hash = Math.imul(hash, 0x01000193);
+      }
     }
   }
 

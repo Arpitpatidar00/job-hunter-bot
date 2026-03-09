@@ -475,7 +475,7 @@ export function formatDailyReport(data) {
     totalRawJobs > 0 ? ((uniqueStored / totalRawJobs) * 100).toFixed(1) : "0";
   const totalJobs = uniqueStored + dupes;
   const relevancePass =
-    totalJobs > 0 ? ((alertsSent / totalJobs) * 100).toFixed(0) : "0";
+    totalJobs > 0 ? ((alertsSent / totalJobs) * 100).toFixed(1) : "0";
 
   // Skill parsing
   let skillCounts = {};

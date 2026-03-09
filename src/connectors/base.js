@@ -63,7 +63,7 @@ export async function fetchWithTimeout(
         // Avoid logging full logger.warn since logger is not imported everywhere?
         // Ah, logger is imported at the top of base.js.
         logger.warn(
-          `[Fetch] Attempt ${attempt + 1} failed for ${url} (${err.message}). Retrying in ${Math.round(delay)}ms...`,
+          `[Fetch] Attempt ${attempt + 1} failed for ${url} (${err.message || err.toString() || "unknown error"}). Retrying in ${Math.round(delay)}ms...`,
         );
         await new Promise((r) => setTimeout(r, delay));
       }
@@ -207,11 +207,15 @@ export function buildSourceList(config) {
 
   // 1. Convert legacy feeds[] to source objects
   for (const entry of config.feeds || []) {
-    const url = typeof entry === "string" ? entry : entry.url;
-    const name =
+    let rawUrl = typeof entry === "string" ? entry : entry.url;
+    const url = rawUrl ? decodeURIComponent(rawUrl) : rawUrl;
+
+    let rawName =
       typeof entry === "string"
         ? hostnameLabel(url)
         : entry.name || hostnameLabel(url);
+    const name = rawName ? decodeURIComponent(rawName) : rawName;
+
     if (url && !seenUrls.has(url)) {
       seenUrls.add(url);
       sources.push({
@@ -227,17 +231,21 @@ export function buildSourceList(config) {
 
   // 2. Merge explicit sources[] (new format)
   for (const s of config.sources || []) {
-    if (s.url && !seenUrls.has(s.url)) {
-      seenUrls.add(s.url);
-      sources.push({
-        type: s.type || "rss",
-        url: s.url,
-        name: s.name || hostnameLabel(s.url),
-        enabled: s.enabled !== false,
-        metadata: s.metadata || {},
-        etag: s.etag,
-        lastModified: s.lastModified,
-      });
+    if (s.url) {
+      const url = decodeURIComponent(s.url);
+      const name = decodeURIComponent(s.name || hostnameLabel(url));
+      if (!seenUrls.has(url)) {
+        seenUrls.add(url);
+        sources.push({
+          type: s.type || "rss",
+          url: url,
+          name: name,
+          enabled: s.enabled !== false,
+          metadata: s.metadata || {},
+          etag: s.etag,
+          lastModified: s.lastModified,
+        });
+      }
     }
   }
 

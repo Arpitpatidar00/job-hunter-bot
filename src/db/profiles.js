@@ -101,20 +101,32 @@ export async function getSentAlertsForJobs(db, jobIds) {
   if (!jobIds || jobIds.length === 0) return new Set();
 
   try {
-    const placeholders = jobIds.map(() => "?").join(",");
-    const result = await db
-      .prepare(
-        `SELECT job_id, profile_id FROM sent_alerts WHERE job_id IN (${placeholders})`,
-      )
-      .bind(...jobIds)
-      .all();
-
     const sentPairs = new Set();
-    if (result.success && result.results) {
-      for (const row of result.results) {
-        sentPairs.add(`${row.job_id}:${row.profile_id}`);
+    const CHUNK_SIZE = 50;
+    const queryPromises = [];
+
+    for (let i = 0; i < jobIds.length; i += CHUNK_SIZE) {
+      const chunk = jobIds.slice(i, i + CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(",");
+      const queryPromise = db
+        .prepare(
+          `SELECT job_id, profile_id FROM sent_alerts WHERE job_id IN (${placeholders})`,
+        )
+        .bind(...chunk)
+        .all();
+      queryPromises.push(queryPromise);
+    }
+
+    const results = await Promise.all(queryPromises);
+
+    for (const result of results) {
+      if (result.success && result.results) {
+        for (const row of result.results) {
+          sentPairs.add(`${row.job_id}:${row.profile_id}`);
+        }
       }
     }
+
     return sentPairs;
   } catch (err) {
     logger.error(`[D1] Failed to batch fetch sent alerts: ${err.message}`);

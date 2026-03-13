@@ -9,7 +9,91 @@
 
 import logger from "../core/logger.js";
 
-// ── Rate Limiting with KV persistence ───────────────────────────────────────
+// ── Per-Source Job Limit ────────────────────────────────────────────────────
+
+/**
+ * Maximum number of jobs to process from any single source per crawl.
+ * Prevents flood from large ATS boards (some companies have 500+ listings).
+ */
+export const MAX_JOBS_PER_SOURCE = 50;
+
+/**
+ * Cap the number of items returned by a connector to prevent job floods.
+ * @param {Array} items - Fetched items
+ * @param {number} [max] - Override limit
+ * @returns {Array} Capped items
+ */
+export function applySourceLimit(items, max = MAX_JOBS_PER_SOURCE) {
+  if (!items || items.length <= max) return items;
+  logger.info(`[SourceLimit] Capping ${items.length} items to ${max}`);
+  return items.slice(0, max);
+}
+
+// ── ATS Cursor System (Fix 1) ──────────────────────────────────────────────
+
+/** Maximum number of IDs to store in cursor (prevents KV value bloat) */
+const MAX_CURSOR_IDS = 500;
+
+/**
+ * Load previously-seen job IDs for an ATS source from KV.
+ * @param {KVNamespace|null} kv
+ * @param {string} connectorType - e.g. 'greenhouse', 'lever'
+ * @param {string} slug - Company slug
+ * @returns {Promise<Set<string>>} Set of previously-seen IDs
+ */
+export async function loadAtsCursor(kv, connectorType, slug) {
+  if (!kv) return new Set();
+  try {
+    const key = `cursor:${connectorType}:${slug}`;
+    const raw = await kv.get(key);
+    if (!raw) return new Set();
+    const ids = JSON.parse(raw);
+    return new Set(Array.isArray(ids) ? ids : []);
+  } catch (err) {
+    logger.warn(`[AtsCursor] Failed to load cursor for ${connectorType}:${slug}: ${err.message}`);
+    return new Set();
+  }
+}
+
+/**
+ * Save seen job IDs for an ATS source to KV.
+ * @param {KVNamespace|null} kv
+ * @param {string} connectorType
+ * @param {string} slug
+ * @param {Set<string>} seenIds - All IDs seen (old + new)
+ */
+export async function saveAtsCursor(kv, connectorType, slug, seenIds) {
+  if (!kv) return;
+  try {
+    const key = `cursor:${connectorType}:${slug}`;
+    // Keep only most recent MAX_CURSOR_IDS to prevent KV bloat
+    const idsArray = [...seenIds].slice(-MAX_CURSOR_IDS);
+    await kv.put(key, JSON.stringify(idsArray), { expirationTtl: 604800 }); // 7 day TTL
+  } catch (err) {
+    logger.warn(`[AtsCursor] Failed to save cursor for ${connectorType}:${slug}: ${err.message}`);
+  }
+}
+
+/**
+ * Filter items to only include those not previously seen by the cursor.
+ * Returns { newItems, cursorSkipped } for metrics.
+ * @param {object[]} items - Normalized job items (must have .id field)
+ * @param {Set<string>} cursorIds - Previously-seen IDs
+ * @returns {{ newItems: object[], cursorSkipped: number }}
+ */
+export function filterByAtsCursor(items, cursorIds) {
+  if (cursorIds.size === 0) return { newItems: items, cursorSkipped: 0 };
+  const newItems = [];
+  let cursorSkipped = 0;
+  for (const item of items) {
+    if (cursorIds.has(item.id)) {
+      cursorSkipped++;
+    } else {
+      newItems.push(item);
+    }
+  }
+  return { newItems, cursorSkipped };
+}
 
 /** Optional KV namespace for persistent rate limiting across invocations */
 let _kvBinding = null;
@@ -131,6 +215,12 @@ export async function rateLimitDomain(
   const newTs = Date.now();
 
   // Always write to in-memory (fast)
+  // Fix 13: LRU eviction — cap at 100 domains to prevent unbounded growth
+  if (_domainTimestamps.size >= 100) {
+    // Maps iterate in insertion order — first key is the oldest
+    const oldestKey = _domainTimestamps.keys().next().value;
+    _domainTimestamps.delete(oldestKey);
+  }
   _domainTimestamps.set(domain, newTs);
 
   // OPTIMIZATION: Only write to KV occasionally (every 10th request per domain)

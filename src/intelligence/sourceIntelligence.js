@@ -38,6 +38,18 @@ export function assignTier(score) {
     return { tier: 'dormant', cycleInterval: 24 };
 }
 
+/**
+ * Fix 8: Calculate adaptive crawl interval based on source posting frequency.
+ * Sources that post frequently get crawled every cycle; dormant sources get crawled rarely.
+ * @param {object} source - Source row from D1.
+ * @returns {number} Cycle interval (1=every cycle, 24=every 6 hours).
+ */
+export function getAdaptiveCrawlInterval(source) {
+    const postsPerDay = source.posting_frequency || 0;
+    if (postsPerDay <= 0) return 24; // No posts known → crawl rarely
+    return Math.max(1, Math.min(24, Math.floor(24 / postsPerDay)));
+}
+
 // ── Priority Scoring ────────────────────────────────────────────────────────
 
 /**
@@ -139,9 +151,41 @@ export async function recalculatePriorities(db) {
                 continue;
             }
 
+            // Fix 9: Auto-disable zero-yield sources
+            // Sources with 0 unique jobs across many attempts AND high dup ratio → waste CPU
+            const totalAttempts = (source.success_count || 0) + (source.failure_count || 0);
+            const dupRatio = source.dup_ratio || 0;
+            if (totalAttempts >= 10 && (source.total_jobs_found || 0) === 0) {
+                stmts.push(
+                    db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
+                        .bind(source.url)
+                );
+                logger.warn(`[Intelligence] Auto-disabled zero-yield source after ${totalAttempts} attempts: ${source.url}`);
+                continue;
+            }
+            if (totalAttempts >= 10 && dupRatio > 0.95) {
+                // Check if any new jobs in last 7 days via freshness
+                const hoursSinceNew = source.last_new_job_at
+                    ? (Date.now() - new Date(source.last_new_job_at).getTime()) / 3_600_000
+                    : 9999;
+                if (hoursSinceNew > 168) { // > 7 days since last new job
+                    stmts.push(
+                        db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
+                            .bind(source.url)
+                    );
+                    logger.warn(`[Intelligence] Auto-disabled high-dup source (${(dupRatio * 100).toFixed(0)}% dupes, no new jobs in 7d): ${source.url}`);
+                    continue;
+                }
+            }
+
             const score = calculatePriority(source);
-            const { tier, cycleInterval } = assignTier(score);
-            const nextCrawlAt = new Date(Date.now() + cycleInterval * 15 * 60_000).toISOString();
+            const { tier } = assignTier(score);
+            // Fix 8: Use adaptive interval based on posting frequency instead of fixed tier intervals
+            const adaptiveInterval = getAdaptiveCrawlInterval(source);
+            const { cycleInterval: tierInterval } = assignTier(score);
+            // Use the more aggressive of tier-based and adaptive intervals
+            const effectiveInterval = Math.min(adaptiveInterval, tierInterval);
+            const nextCrawlAt = new Date(Date.now() + effectiveInterval * 15 * 60_000).toISOString();
 
             stmts.push(
                 db.prepare(
@@ -169,9 +213,9 @@ export async function recalculatePriorities(db) {
             logger.warn(`[Intelligence] Re-enable check failed: ${reErr.message}`);
         }
 
-        // D1 batch (max 100 statements per batch)
-        for (let i = 0; i < stmts.length; i += 100) {
-            await db.batch(stmts.slice(i, i + 100));
+        // D1 batch — fixed from 100 to 40 to stay within D1 per-batch limit
+        for (let i = 0; i < stmts.length; i += 40) {
+            await db.batch(stmts.slice(i, i + 40));
         }
 
         logger.info(`[Intelligence] Recalculated priorities for ${stmts.length} sources`);

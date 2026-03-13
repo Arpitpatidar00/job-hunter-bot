@@ -115,21 +115,31 @@ export function normalizeJob(raw, sourceMeta = {}) {
   const snippet = content.slice(0, 500);
   const guid = raw.guid || raw.id || link || "";
   const dedupeStr = jobDedupeKey(title, company);
-  const urlPath = link.replace(/\?.*$/, "").replace(/#.*$/, ""); // strip query/fragment
 
-  // Tight hash: includes URL + content snippet → catches same-source re-posts
+  // Fix 6: Content hash EXCLUDES URL so cross-platform duplicates
+  // (same job on Greenhouse + Ashby) produce matching hashes.
   const content_hash = fnvHash(
-    dedupeStr + "::" + urlPath + "::" + content.slice(0, 500),
+    dedupeStr + "::" + content.slice(0, 500),
   );
 
   // Loose hash: company + title only → catches cross-source duplicates
   const similarity_hash = fnvHash(dedupeStr);
+
+  // Fix 5: Identity hash for early dedup (company + title + location)
+  const categories = Array.isArray(raw.categories) ? raw.categories : [];
+  const locationHint = categories.find(c =>
+    /remote|hybrid|onsite|india|europe|worldwide/i.test(c)
+  ) || "";
+  const identity_hash = fnvHash(
+    dedupeStr + "::" + locationHint.toLowerCase().trim(),
+  );
 
   return {
     id: guid,
     url: link,
     content_hash,
     similarity_hash,
+    identity_hash,
     title,
     company,
     link,
@@ -137,7 +147,7 @@ export function normalizeJob(raw, sourceMeta = {}) {
     contentSnippet: snippet,
     pubDate: raw.pubDate || raw.date || "",
     isoDate: raw.isoDate || raw.pubDate || raw.date || "",
-    categories: Array.isArray(raw.categories) ? raw.categories : [],
+    categories,
     sourceUrl: sourceMeta.url || "",
     sourceName: sourceMeta.name || "Unknown",
     sourceType: sourceMeta.type || "rss",

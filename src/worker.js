@@ -169,13 +169,9 @@ function hasBasicKeywordMatch(job, config) {
   let mustMatchHits = 0;
   for (const term of mustMatch) {
     const lower = term.toLowerCase();
-    // Use word-boundary regex for more precise matching
-    try {
-      if (new RegExp(`\\b${escapeRegex(lower)}\\b`, "i").test(text)) {
-        mustMatchHits++;
-      }
-    } catch {
-      if (text.includes(lower)) mustMatchHits++;
+    const re = getCachedRegex(lower);
+    if (re ? re.test(text) : text.includes(lower)) {
+      mustMatchHits++;
     }
   }
 
@@ -183,16 +179,10 @@ function hasBasicKeywordMatch(job, config) {
   const titleLower = (job.title || "").toLowerCase();
   let titleMatchCount = 0;
   for (const term of mustMatch) {
-    try {
-      if (
-        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(
-          titleLower,
-        )
-      ) {
-        titleMatchCount++;
-      }
-    } catch {
-      if (titleLower.includes(term.toLowerCase())) titleMatchCount++;
+    const lower = term.toLowerCase();
+    const re = getCachedRegex(lower);
+    if (re ? re.test(titleLower) : titleLower.includes(lower)) {
+      titleMatchCount++;
     }
   }
 
@@ -206,12 +196,9 @@ function hasBasicKeywordMatch(job, config) {
   let niceToHaveHits = 0;
   for (const term of niceToHave) {
     const lower = term.toLowerCase();
-    try {
-      if (new RegExp(`\\b${escapeRegex(lower)}\\b`, "i").test(text)) {
-        niceToHaveHits++;
-      }
-    } catch {
-      if (text.includes(lower)) niceToHaveHits++;
+    const re = getCachedRegex(lower);
+    if (re ? re.test(text) : text.includes(lower)) {
+      niceToHaveHits++;
     }
   }
 
@@ -246,40 +233,32 @@ function computeQuickKeywordScore(job, config) {
 
   // Title match is worth more (30 points max)
   for (const term of mustMatch) {
-    try {
-      if (
-        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(
-          titleLower,
-        )
-      ) {
-        score += 15;
-        mustHits++;
-      }
-    } catch {}
+    const lower = term.toLowerCase();
+    const re = getCachedRegex(lower);
+    if (re ? re.test(titleLower) : titleLower.includes(lower)) {
+      score += 15;
+      mustHits++;
+    }
   }
 
   // Must-match keywords (40 points max)
   for (const term of mustMatch) {
-    try {
-      if (
-        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(text)
-      ) {
-        score += 10;
-        mustHits++;
-      }
-    } catch {}
+    const lower2 = term.toLowerCase();
+    const re2 = getCachedRegex(lower2);
+    if (re2 ? re2.test(text) : text.includes(lower2)) {
+      score += 10;
+      mustHits++;
+    }
   }
 
   // Nice-to-have keywords (30 points max)
   for (const term of niceToHave) {
-    try {
-      if (
-        new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(text)
-      ) {
-        score += 5;
-        niceHits++;
-      }
-    } catch {}
+    const lower3 = term.toLowerCase();
+    const re3 = getCachedRegex(lower3);
+    if (re3 ? re3.test(text) : text.includes(lower3)) {
+      score += 5;
+      niceHits++;
+    }
   }
 
   // Hard gate: if no must-match hits, cap at 45
@@ -373,6 +352,7 @@ function slimJob(job) {
     categories: job.categories,
     matchedTerms: job.matchedTerms,
     content_hash: job.content_hash,
+    contentSnippet: job.contentSnippet || '',
     sourceUrl: job.sourceUrl,
     publishedAt: job.publishedAt,
     isoDate: job.isoDate,
@@ -488,24 +468,46 @@ async function processFeeds(messages, env, ctx) {
   // Fire KV + D1 stat writes in parallel (non-blocking)
   await Promise.allSettled([...feedResultPromises, ...sourceStatPromises]);
 
-  // ── Intra-batch dedup (fast in-memory) ──────────────────────────────────
-  const seenHashes = new Set();
+  // ── Simplified dedup: identity_hash + content_hash (in-memory only) ─────
+  // Removed broken cycle KV dedup (wrong key `crawl_cycle_counter` vs `__cycle_number`)
+  // D1 UNIQUE constraints are the final catch-all for cross-cycle dedup.
+  const localSeenIdentity = new Set();
+  const localSeenContent = new Set();
   const dedupedJobs = [];
   let inMemoryDupes = 0;
+  let identityDupes = 0;
+  let contentDupes = 0;
 
   for (const job of jobs) {
-    if (job.content_hash && seenHashes.has(job.content_hash)) {
+    // Layer 1: identity_hash dedup (company+title+location)
+    if (job.identity_hash && localSeenIdentity.has(job.identity_hash)) {
       inMemoryDupes++;
+      identityDupes++;
       continue;
     }
-    if (job.content_hash) seenHashes.add(job.content_hash);
+    // Layer 2: content_hash dedup (company+title+content[:500])
+    if (job.content_hash && localSeenContent.has(job.content_hash)) {
+      inMemoryDupes++;
+      contentDupes++;
+      continue;
+    }
+    if (job.identity_hash) localSeenIdentity.add(job.identity_hash);
+    if (job.content_hash) localSeenContent.add(job.content_hash);
     dedupedJobs.push(job);
   }
 
   const perfEnd = performance.now();
-  if (env.ENVIRONMENT === "local") {
+  // Fix 12+13: Enhanced metrics — always log performance breakdown
+  logger.info(
+    `[Metrics] processFeeds: total=${(perfEnd - perfStart).toFixed(0)}ms | ` +
+    `rawJobs=${jobs.length} deduped=${dedupedJobs.length} | ` +
+    `identityDupes=${identityDupes} contentDupes=${contentDupes} totalInMemory=${inMemoryDupes}`,
+  );
+  for (const fs of feedStats) {
     logger.info(
-      `[Local CPU] processFeeds used ${(perfEnd - perfStart).toFixed(2)}ms`,
+      `[Metrics] source=${fs.type || 'unknown'}:${fs.name || fs.url} | ` +
+      `fetched=${fs.count || 0} cursorSkipped=${fs.cursorSkipped || 0} ` +
+      `error=${fs.error || 'none'} durationMs=${fs.durationMs || 0}`,
     );
   }
 
@@ -656,9 +658,9 @@ async function processFeeds(messages, env, ctx) {
       let newAts = 0,
         newDomains = 0;
       try {
-        // Build a rich URL set: include all available URL fields from each job
+        // Fix 10: Only run discovery on newly inserted jobs, not all raw jobs
         const urlsForAtsDetection = [];
-        for (const job of jobs) {
+        for (const job of newJobs) {
           if (job.link) urlsForAtsDetection.push(job.link);
           if (job.company_url) urlsForAtsDetection.push(job.company_url);
           if (job.apply_url) urlsForAtsDetection.push(job.apply_url);
@@ -1239,24 +1241,46 @@ async function _scheduledImpl(event, env, ctx) {
   );
   const allSources = [...configSources, ...additionalSources];
 
-  // ── 2. Priority-based source selection ────────────────────────────────
+  // ── Fix 4: Unified priority-based source selection ────────────────────
+  // Config sources NO LONGER bypass the priority system. All sources are
+  // scored and the top MAX_SOURCES_PER_CYCLE are selected.
+  const MAX_SOURCES_PER_CYCLE = 40;
   let sourcesToCrawl;
   if (isIntelEnabled) {
     try {
       const prioritySources = await getSourcesForCycle(env.DB, cycleNumber);
-      sourcesToCrawl = [
-        ...configSources,
-        ...prioritySources.filter((s) => !configUrls.has(s.url)),
-      ];
+
+      // Merge: deduplicate by URL, config sources get priority bonus
+      const mergedMap = new Map();
+      for (const s of prioritySources) {
+        mergedMap.set(s.url, { ...s, _priority: s.priority_score || 50 });
+      }
+      for (const s of configSources) {
+        const existing = mergedMap.get(s.url);
+        if (existing) {
+          // Config source already in registry — give it a bonus
+          existing._priority = (existing._priority || 50) + 10;
+        } else {
+          // Config source not in registry — add with bonus
+          mergedMap.set(s.url, { ...s, _priority: 60 });
+        }
+      }
+
+      // Sort by priority descending, take top N
+      const allMerged = [...mergedMap.values()]
+        .sort((a, b) => (b._priority || 50) - (a._priority || 50))
+        .slice(0, MAX_SOURCES_PER_CYCLE);
+
+      sourcesToCrawl = allMerged;
       logger.info(
-        `[Producer] Intelligence: ${sourcesToCrawl.length} sources selected (${configSources.length} config + ${prioritySources.filter((s) => !configUrls.has(s.url)).length} registry)`,
+        `[Producer] Intelligence: ${sourcesToCrawl.length} sources selected from ${mergedMap.size} total (top ${MAX_SOURCES_PER_CYCLE} by priority)`,
       );
     } catch (err) {
       logger.warn(`[Producer] Intelligence fallback: ${err.message}`);
-      sourcesToCrawl = allSources;
+      sourcesToCrawl = allSources.slice(0, MAX_SOURCES_PER_CYCLE);
     }
   } else {
-    sourcesToCrawl = allSources;
+    sourcesToCrawl = allSources.slice(0, MAX_SOURCES_PER_CYCLE);
   }
 
   logger.info(

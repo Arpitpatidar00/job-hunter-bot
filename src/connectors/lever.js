@@ -8,7 +8,7 @@
  * Docs: https://github.com/lever/postings-api
  */
 
-import { fetchWithTimeout, rateLimitDomain } from "./base.js";
+import { fetchWithTimeout, rateLimitDomain, applySourceLimit, loadAtsCursor, saveAtsCursor, filterByAtsCursor } from "./base.js";
 import { normalizeJob } from "../core/schema.js";
 import { sanitizeText, pLimit } from "../core/utils.js";
 import logger from "../core/logger.js";
@@ -115,7 +115,7 @@ function normalizeLeverJob(posting, source) {
  * @param {object} config
  * @returns {Promise<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>}
  */
-async function fetchSingleBoard(source, config) {
+async function fetchSingleBoard(source, config, kv) {
   const slug = extractSlug(source.url);
   const apiUrl = buildApiUrl(slug);
 
@@ -131,14 +131,22 @@ async function fetchSingleBoard(source, config) {
     // Lever returns an array directly
     const postings = Array.isArray(data) ? data : [];
 
-    const items = postings.map((p) => normalizeLeverJob(p, source));
+    const allItems = applySourceLimit(postings.map((p) => normalizeLeverJob(p, source)));
 
-    logger.info(`[Lever] ${source.name}: ${items.length} jobs fetched`);
+    // ATS cursor: filter out previously seen jobs
+    const cursorIds = await loadAtsCursor(kv, 'lever', slug);
+    const { newItems, cursorSkipped } = filterByAtsCursor(allItems, cursorIds);
+
+    for (const item of allItems) cursorIds.add(item.id);
+    await saveAtsCursor(kv, 'lever', slug, cursorIds);
+
+    logger.info(`[Lever] ${source.name}: ${newItems.length} new / ${cursorSkipped} cursor-skipped / ${allItems.length} total`);
 
     return {
       feedUrl: source.url,
       sourceName: source.name || slug,
-      items,
+      items: newItems,
+      cursorSkipped,
     };
   } catch (err) {
     const msg = err.name === "AbortError" ? "Timeout" : err.message;
@@ -159,11 +167,11 @@ async function fetchSingleBoard(source, config) {
  * @param {object} config
  * @returns {Promise<Array<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>>}
  */
-export async function fetchLeverJobs(sources, config) {
+export async function fetchLeverJobs(sources, config, kv) {
   const limit = pLimit(CONCURRENCY);
 
   const promises = sources.map((source) =>
-    limit(() => fetchSingleBoard(source, config)),
+    limit(() => fetchSingleBoard(source, config, kv)),
   );
 
   const results = await Promise.allSettled(promises);

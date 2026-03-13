@@ -14,7 +14,7 @@ export function loadConfig() {
     version: "3.2.0",
     feeds: [
       "https://jobscollider.com/remote-jobs.rss",
-      "https://hireweb3.io/job/rss",
+      // "https://hireweb3.io/job/rss",              // Disabled: Web3 niche — low relevance for MERN stack
       "https://empllo.com/feeds/remote-engineering-jobs.rss",
       "https://empllo.com/feeds/remote-devops-jobs.rss",
       "https://www.smartremotejobs.com/feed/all.rss",
@@ -27,14 +27,14 @@ export function loadConfig() {
       "https://weworkremotely.com/categories/remote-front-end-programming-jobs.rss",
       "https://remoteok.com/remote-dev-jobs.rss",
       "https://himalayas.app/jobs/rss",
-      "https://4dayweek.io/rss",
-      "https://app.vuejobs.com/feed/posts",
-      "https://dribbble.com/jobs.rss",
+      // "https://4dayweek.io/rss",                   // Disabled: Very low volume, high duplicate overlap
+      // "https://app.vuejobs.com/feed/posts",        // Disabled: Vue-specific — user targets React/MERN
+      // "https://dribbble.com/jobs.rss",             // Disabled: Design-focused — low developer match rate
       "https://hasjob.co/feed",
       "https://remoteok.io/remote-jobs.rss",
-      "https://www.fossjobs.net/rss/all/",
-      "https://cryptojobslist.com/jobs.rss",
-      "https://cryptocurrencyjobs.co/index.xml",
+      // "https://www.fossjobs.net/rss/all/",         // Disabled: FOSS-only — very low volume
+      // "https://cryptojobslist.com/jobs.rss",       // Disabled: Crypto niche — low relevance
+      // "https://cryptocurrencyjobs.co/index.xml",   // Disabled: Crypto niche — low relevance
       "https://jobspresso.co/feed/?post_type=job_listing",
       "https://remoteworkhub.com/feed/?post_type=job",
       "https://landing.jobs/feed?remote=true",
@@ -85,18 +85,8 @@ export function loadConfig() {
         name: "Supabase",
         enabled: true,
       },
-      {
-        type: "greenhouse",
-        url: "https://boards-api.greenhouse.io/v1/boards/linear/jobs",
-        name: "Linear",
-        enabled: true,
-      },
-      {
-        type: "greenhouse",
-        url: "https://boards-api.greenhouse.io/v1/boards/notion/jobs",
-        name: "Notion",
-        enabled: true,
-      },
+      // Linear: crawled via Ashby connector (removed from Greenhouse to avoid cross-platform dupes)
+      // Notion: crawled via Ashby connector (removed from Greenhouse to avoid cross-platform dupes)
       {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/datadog/jobs",
@@ -262,12 +252,7 @@ export function loadConfig() {
         name: "Twitch",
         enabled: true,
       },
-      {
-        type: "lever",
-        url: "https://api.lever.co/v0/postings/netlify",
-        name: "Netlify (Lever)",
-        enabled: true,
-      },
+      // Netlify: crawled via Greenhouse connector (removed from Lever to avoid cross-platform dupes)
       // New Lever companies
       {
         type: "lever",
@@ -299,12 +284,7 @@ export function loadConfig() {
         name: "Webflow",
         enabled: true,
       },
-      {
-        type: "lever",
-        url: "https://api.lever.co/v0/postings/vercel",
-        name: "Vercel (Lever)",
-        enabled: true,
-      },
+      // Vercel: crawled via Greenhouse connector (removed from Lever to avoid cross-platform dupes)
       {
         type: "lever",
         url: "https://api.lever.co/v0/postings/lottiefiles",

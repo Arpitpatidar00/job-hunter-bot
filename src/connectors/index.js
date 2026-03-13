@@ -42,10 +42,10 @@ const CONNECTOR_MAP = {
     }));
     return fetchRssFeeds(rssSources, config, kv);
   },
-  greenhouse: fetchGreenhouseJobs,
-  lever: fetchLeverJobs,
-  ashby: fetchAshbyJobs,
-  workable: fetchWorkableJobs,
+  greenhouse: (sources, config, kv) => fetchGreenhouseJobs(sources, config, kv),
+  lever: (sources, config, kv) => fetchLeverJobs(sources, config, kv),
+  ashby: (sources, config, kv) => fetchAshbyJobs(sources, config, kv),
+  workable: (sources, config, kv) => fetchWorkableJobs(sources, config, kv),
   career_page: (sources, config) =>
     fetchCareerPageJobs(sources, config).then((r) => {
       // Normalize the career page result shape to match other connectors

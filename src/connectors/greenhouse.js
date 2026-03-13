@@ -8,7 +8,7 @@
  * Docs: https://developers.greenhouse.io/job-board.html
  */
 
-import { fetchWithTimeout, rateLimitDomain, buildFeedStat } from './base.js';
+import { fetchWithTimeout, rateLimitDomain, buildFeedStat, applySourceLimit, loadAtsCursor, saveAtsCursor, filterByAtsCursor } from './base.js';
 import { normalizeJob } from '../core/schema.js';
 import { sanitizeText, pLimit } from '../core/utils.js';
 import logger from '../core/logger.js';
@@ -95,7 +95,7 @@ function normalizeGreenhouseJob(ghJob, source) {
  * @param {object} config
  * @returns {Promise<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>}
  */
-async function fetchSingleBoard(source, config) {
+async function fetchSingleBoard(source, config, kv) {
     const slug = extractSlug(source.url);
     const apiUrl = buildApiUrl(slug);
     const startMs = Date.now();
@@ -111,14 +111,23 @@ async function fetchSingleBoard(source, config) {
         const data = await res.json();
         const ghJobs = data.jobs || [];
 
-        const items = ghJobs.map(j => normalizeGreenhouseJob(j, source));
+        const allItems = applySourceLimit(ghJobs.map(j => normalizeGreenhouseJob(j, source)));
 
-        logger.info(`[Greenhouse] ${source.name}: ${items.length} jobs fetched`);
+        // ATS cursor: filter out previously seen jobs
+        const cursorIds = await loadAtsCursor(kv, 'greenhouse', slug);
+        const { newItems, cursorSkipped } = filterByAtsCursor(allItems, cursorIds);
+
+        // Update cursor with all current IDs
+        for (const item of allItems) cursorIds.add(item.id);
+        await saveAtsCursor(kv, 'greenhouse', slug, cursorIds);
+
+        logger.info(`[Greenhouse] ${source.name}: ${newItems.length} new / ${cursorSkipped} cursor-skipped / ${allItems.length} total`);
 
         return {
             feedUrl: source.url,
             sourceName: source.name || slug,
-            items,
+            items: newItems,
+            cursorSkipped,
         };
     } catch (err) {
         const msg = err.name === 'AbortError'
@@ -141,11 +150,11 @@ async function fetchSingleBoard(source, config) {
  * @param {object} config
  * @returns {Promise<Array<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>>}
  */
-export async function fetchGreenhouseJobs(sources, config) {
+export async function fetchGreenhouseJobs(sources, config, kv) {
     const limit = pLimit(CONCURRENCY);
 
     const promises = sources.map(source =>
-        limit(() => fetchSingleBoard(source, config))
+        limit(() => fetchSingleBoard(source, config, kv))
     );
 
     const results = await Promise.allSettled(promises);

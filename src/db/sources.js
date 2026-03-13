@@ -18,6 +18,40 @@ export async function registerDiscoveredSource(db, source) {
 
     if (!safeUrl) return;
 
+    // Fix 8+10: Source cap with eviction — evict lowest-priority stale source to make room
+    const MAX_TOTAL_SOURCES = 500;
+    const countResult = await db
+      .prepare("SELECT COUNT(*) as cnt FROM source_registry")
+      .first();
+    if (countResult && countResult.cnt >= MAX_TOTAL_SOURCES) {
+      // Try to evict the worst source before giving up
+      try {
+        const evictResult = await db.prepare(
+          `DELETE FROM source_registry
+           WHERE url = (
+             SELECT url FROM source_registry
+             WHERE enabled = 0
+               OR (priority_score < 10 AND last_new_job_at < datetime('now', '-14 days'))
+               OR (priority_score IS NULL AND last_fetched_at < datetime('now', '-14 days'))
+             ORDER BY priority_score ASC, last_fetched_at ASC
+             LIMIT 1
+           )`
+        ).run();
+        const evicted = evictResult?.meta?.changes || 0;
+        if (evicted > 0) {
+          logger.info(`[D1] Evicted 1 stale source to make room for ${safeUrl}`);
+        } else {
+          logger.warn(
+            `[D1] Source registry at cap (${MAX_TOTAL_SOURCES}), no evictable source, rejecting ${safeUrl}`,
+          );
+          return;
+        }
+      } catch (evictErr) {
+        logger.warn(`[D1] Source eviction failed: ${evictErr.message}, rejecting ${safeUrl}`);
+        return;
+      }
+    }
+
     await db
       .prepare(
         `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin)
@@ -239,5 +273,49 @@ export async function getSourceMetrics(db) {
   } catch (err) {
     logger.warn(`[D1] Failed to get metrics: ${err.message}`);
     return { sourcesByType: [], totalJobsInDb: 0, totalDocumentsProcessed: 0 };
+  }
+}
+
+/**
+ * Fix 12: Update per-source alert metrics (alert_rate, avg_score).
+ * Enables data-driven source quality ranking.
+ *
+ * @param {D1Database} db
+ * @param {Map<string, { alertCount: number, totalScore: number, jobCount: number }>} sourceMetrics
+ */
+export async function updateSourceAlertMetrics(db, sourceMetrics) {
+  if (!sourceMetrics || sourceMetrics.size === 0) return;
+
+  try {
+    const stmts = [];
+    for (const [sourceUrl, metrics] of sourceMetrics) {
+      const avgScore = metrics.jobCount > 0
+        ? Math.round(metrics.totalScore / metrics.jobCount)
+        : 0;
+      const alertRate = metrics.jobCount > 0
+        ? Math.round((metrics.alertCount / metrics.jobCount) * 100) / 100
+        : 0;
+      stmts.push(
+        db.prepare(
+          `UPDATE source_registry
+           SET avg_score = COALESCE(
+                 ROUND((COALESCE(avg_score, 0) * 0.7 + ? * 0.3)),
+                 ?
+               ),
+               alert_rate = COALESCE(
+                 ROUND((COALESCE(alert_rate, 0) * 0.7 + ? * 0.3), 2),
+                 ?
+               )
+           WHERE url = ?`
+        ).bind(avgScore, avgScore, alertRate, alertRate, sourceUrl)
+      );
+    }
+    // D1 batch (max 40)
+    for (let i = 0; i < stmts.length; i += 40) {
+      await db.batch(stmts.slice(i, i + 40));
+    }
+    logger.info(`[D1] Updated alert metrics for ${sourceMetrics.size} sources`);
+  } catch (err) {
+    logger.warn(`[D1] Failed to update source alert metrics: ${err.message}`);
   }
 }

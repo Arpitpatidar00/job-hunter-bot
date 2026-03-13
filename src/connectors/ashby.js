@@ -8,7 +8,7 @@
  * The Ashby API uses POST with no body to return the job board data.
  */
 
-import { fetchWithTimeout, rateLimitDomain } from "./base.js";
+import { fetchWithTimeout, rateLimitDomain, applySourceLimit, loadAtsCursor, saveAtsCursor, filterByAtsCursor } from "./base.js";
 import { normalizeJob } from "../core/schema.js";
 import { sanitizeText, pLimit } from "../core/utils.js";
 import logger from "../core/logger.js";
@@ -107,14 +107,13 @@ function normalizeAshbyJob(ashbyJob, source, slug) {
  * @param {object} config
  * @returns {Promise<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>}
  */
-async function fetchSingleBoard(source, config) {
+async function fetchSingleBoard(source, config, kv) {
   const slug = extractSlug(source.url);
   const apiUrl = buildApiUrl(slug);
 
   try {
     await rateLimitDomain(apiUrl);
 
-    // Ashby requires a specific GraphQL payload to fetch public job boards
     const payload = {
       operationName: "ApiJobBoardWithTeams",
       variables: {
@@ -143,14 +142,22 @@ async function fetchSingleBoard(source, config) {
     const data = await res.json();
     const ashbyJobs = data?.data?.jobBoard?.jobPostings || [];
 
-    const items = ashbyJobs.map((j) => normalizeAshbyJob(j, source, slug));
+    const allItems = applySourceLimit(ashbyJobs.map((j) => normalizeAshbyJob(j, source, slug)));
 
-    logger.info(`[Ashby] ${source.name}: ${items.length} jobs fetched`);
+    // ATS cursor: filter out previously seen jobs
+    const cursorIds = await loadAtsCursor(kv, 'ashby', slug);
+    const { newItems, cursorSkipped } = filterByAtsCursor(allItems, cursorIds);
+
+    for (const item of allItems) cursorIds.add(item.id);
+    await saveAtsCursor(kv, 'ashby', slug, cursorIds);
+
+    logger.info(`[Ashby] ${source.name}: ${newItems.length} new / ${cursorSkipped} cursor-skipped / ${allItems.length} total`);
 
     return {
       feedUrl: source.url,
       sourceName: source.name || slug,
-      items,
+      items: newItems,
+      cursorSkipped,
     };
   } catch (err) {
     const msg = err.name === "AbortError" ? "Timeout" : err.message;
@@ -171,11 +178,11 @@ async function fetchSingleBoard(source, config) {
  * @param {object} config
  * @returns {Promise<Array<{ feedUrl: string, sourceName: string, items: RawJob[], error?: string }>>}
  */
-export async function fetchAshbyJobs(sources, config) {
+export async function fetchAshbyJobs(sources, config, kv) {
   const limit = pLimit(CONCURRENCY);
 
   const promises = sources.map((source) =>
-    limit(() => fetchSingleBoard(source, config)),
+    limit(() => fetchSingleBoard(source, config, kv)),
   );
 
   const results = await Promise.allSettled(promises);

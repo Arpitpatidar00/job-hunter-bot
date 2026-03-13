@@ -607,6 +607,8 @@ export function loadConfig() {
     // ── Self-Expanding Engine Configuration ────────────────────────────────
     searchExpansion: {
       enabled: true,
+      /** Base discovery query — configurable instead of hardcoded */
+      baseQuery: 'MERN remote India "careers"',
       queries: [
         // --- ATS board discovery (directly targets Greenhouse/Lever/Ashby URLs) ---
         // These surface actual ATS board URLs that sourceDiscovery.js can pattern-match
@@ -637,12 +639,12 @@ export function loadConfig() {
       enabled: true,
       /** Run priority recalculation every N cron cycles */
       recalcIntervalCycles: 4,
-      /** Run search expansion every N cron cycles — every ~1 hour (was 8 = ~2 hours) */
-      searchIntervalCycles: 4,
-      /** Run career page probing every N cron cycles — every ~1 hour (was 6 = ~1.5 hours) */
+      /** Run search expansion every N cron cycles — every ~2 hours */
+      searchIntervalCycles: 8,
+      /** Run career page probing every N cron cycles — every ~1 hour */
       careerProbeIntervalCycles: 4,
-      /** Max domains to probe per career detection cycle (was 10) */
-      maxCareerProbes: 20,
+      /** Max domains to probe per career detection cycle (capped to stay within subrequest limits) */
+      maxCareerProbes: 3,
     },
 
     dryRun: false,

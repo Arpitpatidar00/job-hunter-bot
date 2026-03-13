@@ -36,11 +36,14 @@ import {
   recordTermFrequencies,
   getGlobalTermFrequencies,
   updateSourceStats,
+  batchUpdateSourceStats,
   registerDiscoveredSource,
   batchRegisterDiscoveredSources,
   getSourceMetrics,
   getEnabledSources,
   cleanupStaleJobs,
+  cleanupStaleChunks,
+  cleanupStaleAlerts,
 } from "./db/index.js";
 
 // Missing import fix for ReferenceError in Queue worker
@@ -147,6 +150,36 @@ async function saveStressTestLog(env, reportData) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Module-Level Config Cache ─────────────────────────────────────────────────
+/** Cache loadConfig() at module level so it's not re-parsed every invocation. */
+let _cachedConfig = null;
+function getConfig() {
+  if (!_cachedConfig) _cachedConfig = loadConfig();
+  return _cachedConfig;
+}
+
+// ── Regex Cache for Keyword Matching ──────────────────────────────────────────
+/** Module-level regex cache — shared across all calls within a warm worker. */
+const _regexCache = new Map();
+
+/**
+ * Get or create a cached word-boundary regex for a lowercase keyword.
+ * Prevents `new RegExp()` per keyword per job — saves ~60ms/cycle.
+ * @param {string} keyword - Already lowercased.
+ * @returns {RegExp|null}
+ */
+function getCachedRegex(keyword) {
+  if (_regexCache.has(keyword)) return _regexCache.get(keyword);
+  try {
+    const re = new RegExp(`\\b${escapeRegex(keyword)}\\b`, 'i');
+    _regexCache.set(keyword, re);
+    return re;
+  } catch {
+    _regexCache.set(keyword, null);
+    return null;
+  }
 }
 
 /**
@@ -330,8 +363,8 @@ function deferIO(ctx, promise, label = "deferred") {
 async function evaluateJobsFallback(jobs, env, ctx) {
   const fakeMessages = jobs.map((job) => ({
     body: job,
-    ack() {},
-    retry() {},
+    ack() { },
+    retry() { },
   }));
   await evaluateJobs(fakeMessages, env, ctx);
 }
@@ -385,7 +418,7 @@ async function queueHandler(batch, env, ctx) {
 // ── 1. Fetcher (Consumes FEED_QUEUE) ─────────────────────────────────────────
 async function processFeeds(messages, env, ctx) {
   const perfStart = performance.now();
-  const config = loadConfig();
+  const config = getConfig();
   const startTime = Date.now();
 
   // Each message.body is a source definition from scheduled()
@@ -442,7 +475,7 @@ async function processFeeds(messages, env, ctx) {
   let crawlSuccesses = 0;
   let crawlFailures = 0;
   const feedResultPromises = [];
-  const sourceStatPromises = [];
+  const sourceStatsList = [];
 
   for (const stat of feedStats) {
     feedResultPromises.push(
@@ -456,17 +489,20 @@ async function processFeeds(messages, env, ctx) {
     );
     if (!stat.error) crawlSuccesses++;
     else crawlFailures++;
-    sourceStatPromises.push(
-      updateSourceStats(env.DB, stat.url, {
-        success: !stat.error,
-        jobCount: stat.count || 0,
-      }).catch((err) =>
-        logger.warn(`[Fetcher] updateSourceStats failed: ${err.message}`),
-      ),
-    );
+    // Collect stats for batch D1 write instead of individual writes
+    sourceStatsList.push({
+      url: stat.url,
+      success: !stat.error,
+      jobCount: stat.count || 0,
+    });
   }
-  // Fire KV + D1 stat writes in parallel (non-blocking)
-  await Promise.allSettled([...feedResultPromises, ...sourceStatPromises]);
+  // Fire KV health writes + batch D1 source stats in parallel
+  await Promise.allSettled([
+    ...feedResultPromises,
+    batchUpdateSourceStats(env.DB, sourceStatsList).catch((err) =>
+      logger.warn(`[Fetcher] batchUpdateSourceStats failed: ${err.message}`)
+    ),
+  ]);
 
   // ── Simplified dedup: identity_hash + content_hash (in-memory only) ─────
   // Removed broken cycle KV dedup (wrong key `crawl_cycle_counter` vs `__cycle_number`)
@@ -760,17 +796,25 @@ async function processFeeds(messages, env, ctx) {
         `[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`,
       );
 
+      // Fix: Only ack messages AFTER D1 insert succeeds. 
+      // If D1 insert failed (newlyInsertedCount lost), retry the messages.
       for (const msg of messages) {
-        msg.ack();
+        try { msg.ack(); } catch { /* already acked */ }
       }
-    })(),
+    })().catch((criticalErr) => {
+      // If the entire waitUntil block fails, retry messages so jobs aren't lost
+      logger.error(`[Fetcher] Critical error in waitUntil — retrying messages: ${criticalErr.message}`);
+      for (const msg of messages) {
+        try { msg.retry(); } catch { /* already acked/retried */ }
+      }
+    }),
   );
 }
 
 // ── 2. Evaluator (Consumes JOB_QUEUE) — CPU-optimized ────────────────────────
 async function evaluateJobs(messages, env, ctx) {
   const perfStart = performance.now();
-  const config = loadConfig();
+  const config = getConfig();
   const EVAL_START = Date.now();
   // Issue 1: Tightened from 25s→22s to give larger margin before the 30s hard kill
   const WALL_TIME_LIMIT_MS = 22_000;
@@ -948,12 +992,33 @@ async function evaluateJobs(messages, env, ctx) {
         );
 
         try {
+          // Slim alert payload — only include fields sendAlert() actually uses
+          // Reduces queue message size from ~5KB to ~2KB
+          const slimAlertJob = {
+            id: job.id,
+            title: job.title,
+            company: job.company,
+            url: job.url || job.link,
+            link: job.link,
+            categories: job.categories,
+            contentSnippet: (job.contentSnippet || '').slice(0, 300),
+            sourceUrl: job.sourceUrl,
+            isoDate: job.isoDate,
+          };
+          const slimScoreResult = {
+            score: scoreResult.score,
+            label: scoreResult.label,
+            color: scoreResult.color,
+            matchedSkills: scoreResult.matchedSkills,
+            reasons: scoreResult.reasons,
+            // Drop full breakdown/features to save payload
+          };
           // Issue 3: Wrap ALERT_QUEUE.send with exponential-backoff retry
           await withRetry(() =>
             env.ALERT_QUEUE.send({
               profileId: profile.id,
-              job: job,
-              scoreResult: scoreResult,
+              job: slimAlertJob,
+              scoreResult: slimScoreResult,
             }),
           );
         } catch (queueErr) {
@@ -979,18 +1044,8 @@ async function evaluateJobs(messages, env, ctx) {
         sentAlertsSet.add(`${job.id}:${profile.id}`); // in-memory update
         alertsQueued++;
 
-        // Track score distribution histogram in KV (Issue 3: Fix Telemetry & Score Tracking)
-        if (ctx && ctx.waitUntil) {
-          ctx.waitUntil(
-            trackScoreDistribution(scoreResult.score, env.SEEN_JOBS),
-          );
-        } else {
-          trackScoreDistribution(scoreResult.score, env.SEEN_JOBS).catch((e) =>
-            logger.warn(
-              `[Evaluator] Failed to track score distribution: ${e.message}`,
-            ),
-          );
-        }
+        // Score distribution tracking is now batched in recordJobScoresBatch
+        // (removed per-alert inline trackScoreDistribution to eliminate duplicate KV writes)
 
         scoreSum += scoreResult.score;
         scoreMax = Math.max(scoreMax, scoreResult.score);
@@ -1011,164 +1066,95 @@ async function evaluateJobs(messages, env, ctx) {
     );
   }
 
-  // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
-  if (ctx && ctx.waitUntil) {
-    ctx.waitUntil(
-      (async () => {
-        // Batch write all collected scores to KV (single write instead of per-job)
-        if (scoresToBatch.length > 0) {
-          try {
-            await recordJobScoresBatch(env.SEEN_JOBS, scoresToBatch);
-            logger.info(
-              `[Evaluator] Batch recorded ${scoresToBatch.length} scores to KV`,
-            );
-          } catch (err) {
-            logger.warn(`[Evaluator] Batch KV write failed: ${err.message}`);
-          }
-        }
-
-        // Batch write all collected job chunks to D1 (single batch instead of per-job)
-        if (chunksToBatch.length > 0) {
-          try {
-            const insertStmt = env.DB.prepare(
-              "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
-            );
-            const allChunks = [];
-            for (const jobData of chunksToBatch) {
-              for (let i = 0; i < jobData.chunks.length; i++) {
-                allChunks.push(
-                  insertStmt.bind(
-                    jobData.jobId,
-                    jobData.chunks[i],
-                    JSON.stringify(jobData.chunkVecs[i] || []),
-                    "unknown",
-                  ),
-                );
-              }
-            }
-            // Batch in chunks of 40 (D1 limit)
-            for (let i = 0; i < allChunks.length; i += 40) {
-              await env.DB.batch(allChunks.slice(i, i + 40));
-            }
-            logger.info(
-              `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
-            );
-          } catch (err) {
-            logger.warn(
-              `[Evaluator] Batch chunk insert failed: ${err.message}`,
-            );
-          }
-        }
-
-        // ── Auto-adjust threshold for next run based on this run's match count ──
-        try {
-          await getEffectiveThreshold(
-            env.SEEN_JOBS,
-            config.notificationThreshold,
-            {
-              matchedLastRun: alertsQueued,
-            },
-          );
-        } catch (err) {
-          logger.warn(
-            `[Evaluator] Threshold auto-adjust failed: ${err.message}`,
-          );
-        }
-
-        // ── Daily Metrics ──────────────────────────────────────────────────────
-        try {
-          await incrementDailyMetrics(env.DB, {
-            ai_calls: aiCallsCount,
-            worker_invocations: 1,
-            queue_messages: alertsQueued,
-            score_sum: scoreSum,
-            score_max: scoreMax,
-          });
-        } catch (err) {
-          logger.error(
-            `[Evaluator] Daily metrics update failed: ${err.message}`,
-          );
-        }
-      })(),
-    );
-  } else {
-    // Blocking execution fallback
-    await (async () => {
-      // Batch write all collected scores to KV (single write instead of per-job)
-      if (scoresToBatch.length > 0) {
-        try {
-          await recordJobScoresBatch(env.SEEN_JOBS, scoresToBatch);
-          logger.info(
-            `[Evaluator] Batch recorded ${scoresToBatch.length} scores to KV`,
-          );
-        } catch (err) {
-          logger.warn(`[Evaluator] Batch KV write failed: ${err.message}`);
-        }
-      }
-
-      // Batch write all collected job chunks to D1 (single batch instead of per-job)
-      if (chunksToBatch.length > 0) {
-        try {
-          const insertStmt = env.DB.prepare(
-            "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
-          );
-          const allChunks = [];
-          for (const jobData of chunksToBatch) {
-            for (let i = 0; i < jobData.chunks.length; i++) {
-              allChunks.push(
-                insertStmt.bind(
-                  jobData.jobId,
-                  jobData.chunks[i],
-                  JSON.stringify(jobData.chunkVecs[i] || []),
-                  "unknown",
-                ),
-              );
-            }
-          }
-          // Batch in chunks of 40 (D1 limit)
-          for (let i = 0; i < allChunks.length; i += 40) {
-            await env.DB.batch(allChunks.slice(i, i + 40));
-          }
-          logger.info(
-            `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
-          );
-        } catch (err) {
-          logger.warn(`[Evaluator] Batch chunk insert failed: ${err.message}`);
-        }
-      }
-
-      // ── Auto-adjust threshold for next run based on this run's match count ──
+  // ── Post-evaluation cleanup (extracted to avoid duplicated code blocks) ──────
+  async function postEvaluationCleanup() {
+    // Batch write all collected scores to KV (single write instead of per-job)
+    if (scoresToBatch.length > 0) {
       try {
-        await getEffectiveThreshold(
-          env.SEEN_JOBS,
-          config.notificationThreshold,
-          {
-            matchedLastRun: alertsQueued,
-          },
+        await recordJobScoresBatch(env.SEEN_JOBS, scoresToBatch);
+        logger.info(
+          `[Evaluator] Batch recorded ${scoresToBatch.length} scores to KV`,
         );
       } catch (err) {
-        logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`);
+        logger.warn(`[Evaluator] Batch KV write failed: ${err.message}`);
       }
+    }
 
-      // ── Daily Metrics ──────────────────────────────────────────────────────
+    // Batch write all collected job chunks to D1 (single batch instead of per-job)
+    if (chunksToBatch.length > 0) {
       try {
-        await incrementDailyMetrics(env.DB, {
-          ai_calls: aiCallsCount,
-          worker_invocations: 1,
-          queue_messages: alertsQueued,
-          score_sum: scoreSum,
-          score_max: scoreMax,
-        });
+        const insertStmt = env.DB.prepare(
+          "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
+        );
+        const allChunks = [];
+        for (const jobData of chunksToBatch) {
+          for (let i = 0; i < jobData.chunks.length; i++) {
+            allChunks.push(
+              insertStmt.bind(
+                jobData.jobId,
+                jobData.chunks[i],
+                JSON.stringify(jobData.chunkVecs[i] || []),
+                "unknown",
+              ),
+            );
+          }
+        }
+        // Batch in chunks of 40 (D1 limit)
+        for (let i = 0; i < allChunks.length; i += 40) {
+          await env.DB.batch(allChunks.slice(i, i + 40));
+        }
+        logger.info(
+          `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
+        );
       } catch (err) {
-        logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
+        logger.warn(
+          `[Evaluator] Batch chunk insert failed: ${err.message}`,
+        );
       }
-    })();
+    }
+
+    // ── Auto-adjust threshold for next run based on this run's match count ──
+    try {
+      await getEffectiveThreshold(
+        env.SEEN_JOBS,
+        config.notificationThreshold,
+        {
+          matchedLastRun: alertsQueued,
+        },
+      );
+    } catch (err) {
+      logger.warn(
+        `[Evaluator] Threshold auto-adjust failed: ${err.message}`,
+      );
+    }
+
+    // ── Daily Metrics ──────────────────────────────────────────────────────
+    try {
+      await incrementDailyMetrics(env.DB, {
+        ai_calls: aiCallsCount,
+        worker_invocations: 1,
+        queue_messages: alertsQueued,
+        score_sum: scoreSum,
+        score_max: scoreMax,
+      });
+    } catch (err) {
+      logger.error(
+        `[Evaluator] Daily metrics update failed: ${err.message}`,
+      );
+    }
+  }
+
+  // ── NON-BLOCKING I/O OFFLOAD ─────────────────────────────────────────────
+  if (ctx && ctx.waitUntil) {
+    ctx.waitUntil(postEvaluationCleanup());
+  } else {
+    await postEvaluationCleanup();
   }
 }
 
 // ── 3. Sender (Consumes ALERT_QUEUE) ──────────────────────────────────────────
 async function sendAlerts(messages, env, ctx) {
-  const config = loadConfig();
+  const config = getConfig();
   let sentCount = 0;
   let failedCount = 0;
 
@@ -1218,7 +1204,7 @@ async function sendAlerts(messages, env, ctx) {
  * Issue 7: Extracted so the exported scheduled() can wrap it in a try-catch.
  */
 async function _scheduledImpl(event, env, ctx) {
-  const config = loadConfig();
+  const config = getConfig();
   const intel = config.crawlIntelligence || {};
   const isIntelEnabled = intel.enabled !== false;
 
@@ -1322,8 +1308,8 @@ async function _scheduledImpl(event, env, ctx) {
     );
     const fakeMessages = sourcesToCrawl.map((s) => ({
       body: s,
-      ack() {},
-      retry() {},
+      ack() { },
+      retry() { },
     }));
     for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
       if (Date.now() - directStart > WALL_TIME_LIMIT_MS) {
@@ -1438,8 +1424,10 @@ async function _scheduledImpl(event, env, ctx) {
       ? [...config.searchExpansion.queries]
       : [];
     try {
-      // Force L5 behavior: Base DDG queries for "MERN remote India" as requested
-      dynamicQueries.push('MERN remote India "careers"');
+      // Add base discovery query from config (moved from hardcoded)
+      if (config.searchExpansion?.baseQuery) {
+        dynamicQueries.push(config.searchExpansion.baseQuery);
+      }
 
       // Fetch live market spikes to seed active search
       const { skillSpikes, hiringSurges } = await runGrowthEngineCycle(env.DB);
@@ -1496,6 +1484,10 @@ async function _scheduledImpl(event, env, ctx) {
 
   try {
     await cleanupStaleJobs(env.DB, 30);
+    // Cleanup job_chunks (7-day retention — fastest growing table)
+    await cleanupStaleChunks(env.DB, 7);
+    // Cleanup sent_alerts (90-day retention)
+    await cleanupStaleAlerts(env.DB, 90);
   } catch (err) {
     logger.warn(`[Producer] Cleanup failed: ${err.message}`);
   }
@@ -1609,7 +1601,7 @@ export default {
 
     if (url.pathname === "/trigger" && request.method === "POST") {
       try {
-        const config = loadConfig();
+        const config = getConfig();
         const allSources = buildSourceList(config);
 
         // Try queue-based dispatch first
@@ -1642,8 +1634,8 @@ export default {
           const DIRECT_BATCH_SIZE = 5;
           const fakeMessages = allSources.map((s) => ({
             body: s,
-            ack() {},
-            retry() {},
+            ack() { },
+            retry() { },
           }));
           for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
             if (Date.now() - startTime > WALL_TIME_LIMIT_MS) {
@@ -1695,7 +1687,7 @@ export default {
       const power = parseInt(url.searchParams.get("power")) || 1;
       const TARGET_JOBS = 100 * power;
 
-      const config = loadConfig();
+      const config = getConfig();
       const globalMatcher = getGlobalMatcher(config);
 
       const generateMockJobs = (count) => {

@@ -197,10 +197,11 @@ export async function recalculatePriorities(db) {
         }
 
         // Periodic re-enable: give disabled sources another chance every 48 hours
+        // Re-enable at LOW priority (dormant tier) to minimize resource waste
         try {
             const reEnableResult = await db.prepare(
                 `UPDATE source_registry
-                 SET enabled = 1, consecutive_failures = 0, crawl_tier = 'low', priority_score = 40
+                 SET enabled = 1, consecutive_failures = 0, crawl_tier = 'dormant', priority_score = 20
                  WHERE enabled = 0
                    AND crawl_tier = 'disabled'
                    AND last_fetched_at < datetime('now', '-48 hours')`
@@ -327,9 +328,9 @@ export async function recordSourceYield(db, url, newJobCount, totalJobCount, dup
  */
 export async function recordSourceYieldsBatch(db, yields) {
     if (!yields || yields.length === 0) return;
-    
+
     try {
-        const stmts = yields.map(y => 
+        const stmts = yields.map(y =>
             db.prepare(
                 `UPDATE source_registry
                  SET total_jobs_found = total_jobs_found + ?,
@@ -339,15 +340,15 @@ export async function recordSourceYieldsBatch(db, yields) {
                      dup_ratio = COALESCE(dup_ratio, 0) * 0.6 + ? * 0.4
                  WHERE url = ?`
             ).bind(
-                y.newJobCount, 
-                y.totalJobCount, 
-                y.newJobCount, 
-                y.newJobCount, 
-                y.dupRatio || 0, 
+                y.newJobCount,
+                y.totalJobCount,
+                y.newJobCount,
+                y.newJobCount,
+                y.dupRatio || 0,
                 y.url
             )
         );
-        
+
         // Execute in batches of 40 (D1 batch limit)
         for (let i = 0; i < stmts.length; i += 40) {
             await db.batch(stmts.slice(i, i + 40));
@@ -381,9 +382,9 @@ export async function getAndIncrementCycle(kv) {
             _inMemoryCycle = 0;
         }
     }
-    
+
     _inMemoryCycle++;
-    
+
     // Only write to KV every N cycles to reduce writes
     if (kv && _inMemoryCycle % CYCLE_WRITE_INTERVAL === 0) {
         try {
@@ -392,7 +393,7 @@ export async function getAndIncrementCycle(kv) {
             // Ignore KV errors
         }
     }
-    
+
     return _inMemoryCycle;
 }
 

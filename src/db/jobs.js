@@ -146,3 +146,53 @@ export async function cleanupStaleJobs(db, maxAgeDays = 30) {
         return 0;
     }
 }
+
+/**
+ * Delete stale job chunks older than the given number of days.
+ * job_chunks grow fastest (5 chunks × 3KB per job) and need aggressive cleanup.
+ *
+ * @param {D1Database} db
+ * @param {number} [maxAgeDays=7]
+ * @returns {Promise<number>} Number of chunks cleaned up.
+ */
+export async function cleanupStaleChunks(db, maxAgeDays = 7) {
+    try {
+        const result = await db.prepare(
+            `DELETE FROM job_chunks WHERE created_at < datetime('now', '-' || ? || ' days')`
+        ).bind(maxAgeDays).run();
+
+        const deleted = result.meta?.changes || 0;
+        if (deleted > 0) {
+            logger.info(`[D1] Cleaned up ${deleted} stale job chunks (>${maxAgeDays} days old)`);
+        }
+        return deleted;
+    } catch (err) {
+        // Table may not exist yet — not critical
+        logger.warn(`[D1] Failed to cleanup stale chunks: ${err.message}`);
+        return 0;
+    }
+}
+
+/**
+ * Delete old sent_alerts records to control table growth.
+ *
+ * @param {D1Database} db
+ * @param {number} [maxAgeDays=90]
+ * @returns {Promise<number>} Number of alerts cleaned up.
+ */
+export async function cleanupStaleAlerts(db, maxAgeDays = 90) {
+    try {
+        const result = await db.prepare(
+            `DELETE FROM sent_alerts WHERE sent_at < datetime('now', '-' || ? || ' days')`
+        ).bind(maxAgeDays).run();
+
+        const deleted = result.meta?.changes || 0;
+        if (deleted > 0) {
+            logger.info(`[D1] Cleaned up ${deleted} old sent_alerts (>${maxAgeDays} days old)`);
+        }
+        return deleted;
+    } catch (err) {
+        logger.warn(`[D1] Failed to cleanup stale alerts: ${err.message}`);
+        return 0;
+    }
+}

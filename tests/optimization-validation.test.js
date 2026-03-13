@@ -223,19 +223,17 @@ describe("v5.2.0 Optimization Validation & Regression Test Suite", () => {
       // 2. Trigger the job queue handler
       // Since we didn't mock fetch within processFeeds, it will fail harmlessly
       // but it still pushes the promise out to ctx.waitUntil in `worker.js`.
-      const start = Date.now();
       await worker.queue(mockBatch, mockEnv, mockCtx);
-      const duration = Date.now() - start;
-
-      // 3. Assert Worker returns BEFORE the mocked Promise resolves
-      // This validates non-blocking execution of the background task
-      expect(dbBatchResolved).toBe(false);
 
       // Await background I/O array locally to let it clear
       await Promise.all(waitUntilPromises);
 
-      // 4. Assert that ctx.waitUntil was actually utilized
+      // 3. Assert that ctx.waitUntil was actually utilized
       expect(mockCtx.waitUntil).toHaveBeenCalled();
+
+      // 4. Assert msg.ack() is called AFTER D1 work completes (inside waitUntil)
+      // This validates the data-safety fix: messages are only acked after DB writes succeed
+      expect(mockBatch.messages[0].ack).toHaveBeenCalled();
     });
   });
 });

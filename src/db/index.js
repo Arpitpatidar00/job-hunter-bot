@@ -7,6 +7,8 @@ export {
   insertJobIfNotExists,
   batchInsertJobs,
   cleanupStaleJobs,
+  cleanupStaleChunks,
+  cleanupStaleAlerts,
 } from "./jobs.js";
 export {
   getActiveProfiles,
@@ -22,6 +24,7 @@ export {
   batchRegisterDiscoveredSources,
   getEnabledSources,
   updateSourceStats,
+  batchUpdateSourceStats,
   disableUnreliableSource,
   getSourceMetrics,
 } from "./sources.js";

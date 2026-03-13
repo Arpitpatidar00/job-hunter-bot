@@ -117,9 +117,11 @@ async function fetchSingleBoard(source, config, kv) {
         const cursorIds = await loadAtsCursor(kv, 'greenhouse', slug);
         const { newItems, cursorSkipped } = filterByAtsCursor(allItems, cursorIds);
 
-        // Update cursor with all current IDs
-        for (const item of allItems) cursorIds.add(item.id);
-        await saveAtsCursor(kv, 'greenhouse', slug, cursorIds);
+        // Only update cursor if new items were found (saves KV write when board is unchanged)
+        if (newItems.length > 0) {
+            for (const item of allItems) cursorIds.add(item.id);
+            await saveAtsCursor(kv, 'greenhouse', slug, cursorIds);
+        }
 
         logger.info(`[Greenhouse] ${source.name}: ${newItems.length} new / ${cursorSkipped} cursor-skipped / ${allItems.length} total`);
 

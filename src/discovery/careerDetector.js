@@ -101,7 +101,9 @@ export async function probeDomainsForCareers(db, domains, maxProbes = 15) {
  * @returns {Promise<{careerUrl: string, hasJsonLd: boolean, hasJobLinks: boolean, jobCount: number} | null>}
  */
 async function probeSingleDomain(domain) {
-  for (const path of CAREER_PATHS) {
+  // Limit to first 4 paths to control subrequest count (was 16 paths)
+  const probePaths = CAREER_PATHS.slice(0, 4);
+  for (const path of probePaths) {
     const url = `https://${domain}${path}`;
 
     try {

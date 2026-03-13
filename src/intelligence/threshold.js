@@ -67,7 +67,7 @@ async function saveWindow(kv, window) {
     await kv.put(WINDOW_KEY, JSON.stringify(window), {
       expirationTtl: THRESHOLD_TTL,
     });
-  } catch {}
+  } catch { }
 }
 
 async function readEffective(kv, configDefault) {
@@ -96,7 +96,7 @@ async function saveEffective(kv, value) {
     await kv.put(EFFECTIVE_KEY, String(value), {
       expirationTtl: THRESHOLD_TTL,
     });
-  } catch {}
+  } catch { }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -198,13 +198,19 @@ export async function recordJobScoresBatch(kv, scores) {
   // Single KV write for all scores
   await saveWindow(kv, window);
 
-  // Track distributions for histograms (Issue 3 Fix)
-  // Send in parallel so we don't block
-  const trackPromises = scores
-    .map((s) => trackScoreDistribution(s, kv))
-    .filter((p) => p !== undefined);
-
-  if (trackPromises.length > 0) {
-    await Promise.allSettled(trackPromises);
+  // Track score distribution histogram — batch update with a single KV read-modify-write
+  // instead of N individual calls (fixes duplicate trackScoreDistribution issue)
+  try {
+    const raw = await kv.get("metrics:score_histogram");
+    const hist = raw ? JSON.parse(raw) : {};
+    for (const s of scores) {
+      const bucket = Math.floor(Math.max(0, Math.min(99, s)) / 10) * 10;
+      hist[bucket] = (hist[bucket] || 0) + 1;
+    }
+    await kv.put("metrics:score_histogram", JSON.stringify(hist), {
+      expirationTtl: 86400 * 2,
+    });
+  } catch (err) {
+    // Non-critical — histogram is for observability only
   }
 }

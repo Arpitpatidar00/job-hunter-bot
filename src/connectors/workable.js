@@ -123,8 +123,10 @@ async function fetchSingleBoard(source, config, kv) {
         const cursorIds = await loadAtsCursor(kv, 'workable', slug);
         const { newItems, cursorSkipped } = filterByAtsCursor(allItems, cursorIds);
 
-        for (const item of allItems) cursorIds.add(item.id);
-        await saveAtsCursor(kv, 'workable', slug, cursorIds);
+        if (newItems.length > 0) {
+            for (const item of allItems) cursorIds.add(item.id);
+            await saveAtsCursor(kv, 'workable', slug, cursorIds);
+        }
 
         logger.info(`[Workable] ${source.name}: ${newItems.length} new / ${cursorSkipped} cursor-skipped / ${allItems.length} total`);
 

@@ -116,8 +116,8 @@ export async function detectHiringSurge(db) {
         if (!result.success || !result.results?.length) return [];
 
         const surges = result.results.map(row => ({
-            company:    row.company,
-            jobCount:   row.job_count,
+            company: row.company,
+            jobCount: row.job_count,
             lastPostAt: row.last_post_at,
         }));
 
@@ -202,10 +202,10 @@ export async function persistGrowthSignals(db, skillSpikes, hiringSurges) {
             ).bind(surge.company, surge.jobCount, surge.lastPostAt, momentumScore);
         });
 
-        // Batch in groups of 100 (D1 limit)
+        // Batch in groups of 40 (D1 limit is ~50, use 40 for safety)
         const allStmts = [...spikeStmts, ...surgeStmts];
-        for (let i = 0; i < allStmts.length; i += 100) {
-            await db.batch(allStmts.slice(i, i + 100));
+        for (let i = 0; i < allStmts.length; i += 40) {
+            await db.batch(allStmts.slice(i, i + 40));
         }
 
         spikesSaved = spikeStmts.length;

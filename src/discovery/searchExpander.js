@@ -49,6 +49,54 @@ const DISCOVERY_STATS_KEY = "discovery:last_run_stats";
 /** KV key for tracking last successful discovery timestamp. */
 const DISCOVERY_SUCCESS_KEY = "discovery:last_success_timestamp";
 
+/** Estimated max KV writes per day on free tier. */
+const FREE_TIER_DAILY_KV_WRITES = 1000;
+
+/** Max KV writes this module should consume per expansion run. */
+const MAX_KV_WRITES_PER_RUN = 3;
+
+// ── KV Write with Exponential Backoff ────────────────────────────────────────
+
+/**
+ * Write to KV with exponential backoff retry for 429 rate-limit errors.
+ * Other errors are thrown immediately (no retry).
+ *
+ * @param {KVNamespace} kv
+ * @param {string} key
+ * @param {string} value
+ * @param {object} [options] - KV put options (e.g. expirationTtl)
+ * @param {number} [maxRetries=5]
+ * @returns {Promise<void>}
+ */
+async function kvPutWithRetry(kv, key, value, options = {}, maxRetries = 5) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await kv.put(key, value, options);
+      return; // Success
+    } catch (err) {
+      lastErr = err;
+      const is429 =
+        err.message?.includes("429") ||
+        err.message?.toLowerCase().includes("rate limit") ||
+        err.message?.toLowerCase().includes("too many requests");
+
+      if (!is429 || attempt >= maxRetries) {
+        // Non-retryable error or exhausted retries — throw immediately
+        throw err;
+      }
+
+      // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms + jitter
+      const delay = Math.pow(2, attempt) * 100 + Math.random() * 100;
+      logger.warn(
+        `[SearchExpander] KV write rate-limited (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms...`,
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Run search-based expansion for a list of queries.
  *
@@ -76,6 +124,9 @@ export async function runSearchExpansion(
     attempted: 0,
     discovered: 0,
     failed: 0,
+    domainsQueued: 0,
+    fallbackRegistered: 0,
+    kvWritesUsed: 0,
     errors: [],
     timestamp: new Date().toISOString(),
   };
@@ -108,6 +159,7 @@ export async function runSearchExpansion(
       for (const { domain, sourceUrl } of domains) {
         await registerDomain(db, domain, sourceUrl);
         totalNewDomains++;
+        stats.domainsQueued++;
       }
 
       logger.info(
@@ -133,6 +185,7 @@ export async function runSearchExpansion(
         knownSourceUrls.add(src.url);
         totalNewAts++;
         stats.discovered++;
+        stats.fallbackRegistered++;
         logger.info(`[SearchExpander] Static fallback registered: ${src.name}`);
       } catch (err) {
         logger.warn(
@@ -142,31 +195,48 @@ export async function runSearchExpansion(
     }
   }
 
-  // ── Persist discovery stats to KV for report ─────────────────────────────
+  // ── Persist discovery stats to KV (with retry + budget tracking) ───────────
   if (kv) {
     try {
-      await kv.put(DISCOVERY_STATS_KEY, JSON.stringify(stats), {
+      // Write 1: Discovery stats (always — this is critical for the daily report)
+      await kvPutWithRetry(kv, DISCOVERY_STATS_KEY, JSON.stringify(stats), {
         expirationTtl: 60 * 60 * 48, // 48h TTL
       });
+      stats.kvWritesUsed++;
 
-      // Update last success timestamp if any sources were discovered
+      // Write 2: Last success timestamp (only if new sources were discovered)
       if (stats.discovered > 0) {
-        await kv.put(DISCOVERY_SUCCESS_KEY, new Date().toISOString(), {
-          expirationTtl: 60 * 60 * 24 * 7, // 7 days
-        });
+        await kvPutWithRetry(
+          kv,
+          DISCOVERY_SUCCESS_KEY,
+          new Date().toISOString(),
+          { expirationTtl: 60 * 60 * 24 * 7 }, // 7 days
+        );
+        stats.kvWritesUsed++;
       }
-    } catch (err) {
-      logger.warn(
-        `[SearchExpander] Failed to write discovery stats to KV: ${err.message}`,
+
+      logger.info(
+        `[SearchExpander] KV persistence complete: ${stats.kvWritesUsed} writes used (budget: ${MAX_KV_WRITES_PER_RUN}/run)`,
       );
+    } catch (err) {
+      // After retry exhaustion, log but don't crash — DB writes already persisted the sources
+      logger.error(
+        `[SearchExpander] KV write failed after retries: ${err.message} — stats may be stale but sources are safe in DB`,
+      );
+      stats.errors.push(`KV write failed: ${err.message}`);
     }
   }
 
-  if (totalNewAts > 0 || totalNewDomains > 0) {
-    logger.info(
-      `[SearchExpander] Expansion complete: ${totalNewAts} ATS sources, ${totalNewDomains} domains queued`,
-    );
-  }
+  // ── End-of-run summary log ────────────────────────────────────────────────
+  logger.info(
+    `[SearchExpander] Expansion complete: ` +
+      `queries=${stats.attempted}, ` +
+      `ats=${totalNewAts}, ` +
+      `domains=${totalNewDomains}, ` +
+      `fallbacks=${stats.fallbackRegistered}, ` +
+      `failed=${stats.failed}, ` +
+      `kvWrites=${stats.kvWritesUsed}`,
+  );
 
   return { newAtsSources: totalNewAts, newDomains: totalNewDomains };
 }

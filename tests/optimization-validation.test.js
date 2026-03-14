@@ -93,7 +93,7 @@ describe("v5.2.0 Optimization Validation & Regression Test Suite", () => {
   describe("Phase 2: SimHash Collision & Accuracy", () => {
     test("Test Case A: 95% identical texts compute equal 32-bit integer hashes", () => {
       const textA =
-        "Senior Backend Engineer at Google. Experience with Go, Python, and Kubernetes required. Building scalable microservices.";
+        "Senior Backend Engineer at Google. Experience with Go, Python, or Kubernetes required. Building scalable microservices.";
       // Change stop words only (which the 4-char rule filters out)
       const textB =
         "Senior Backend Engineer at Google. Experience with Go, Python, & Kubernetes required. Building scalable microservices.";

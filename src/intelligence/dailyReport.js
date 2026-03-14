@@ -48,6 +48,7 @@ const KNOWN_METRIC_COLUMNS = new Set([
   "d1_writes",
   "queue_messages",
   "ai_calls",
+  "jobs_evaluated",
   "cycles_completed",
 ]);
 
@@ -458,12 +459,13 @@ export function formatDailyReport(data) {
       ? Math.round((m("crawl_successes") / sourcesScanned) * 100)
       : 0;
   const alertsSent = m("alerts_sent");
-  // Prefer per-alert average; fall back to per-job average when no alerts sent
+  const jobsEvaled = m("jobs_evaluated");
+  // Use jobs_evaluated as denominator — gives true average across ALL scored jobs
   let avgScore;
-  if (alertsSent > 0 && m("score_sum") > 0) {
-    avgScore = (m("score_sum") / alertsSent).toFixed(1);
+  if (jobsEvaled > 0 && m("score_sum") > 0) {
+    avgScore = (m("score_sum") / jobsEvaled).toFixed(1);
   } else if (m("score_max") > 0) {
-    // No alerts sent but scoring happened — show max as indicator
+    // No jobs evaluated yet but scoring happened — show max as indicator
     avgScore = m("score_max").toString();
   } else if (uniqueStored > 0) {
     avgScore = "—"; // Jobs exist but haven't been scored yet
@@ -474,8 +476,9 @@ export function formatDailyReport(data) {
   const highValueYield =
     totalRawJobs > 0 ? ((uniqueStored / totalRawJobs) * 100).toFixed(1) : "0";
   const totalJobs = uniqueStored + dupes;
+  // Relevance Pass Rate: alerts sent / jobs actually evaluated (not raw total)
   const relevancePass =
-    totalJobs > 0 ? ((alertsSent / totalJobs) * 100).toFixed(1) : "0";
+    jobsEvaled > 0 ? ((alertsSent / jobsEvaled) * 100).toFixed(1) : "0";
 
   // Skill parsing
   let skillCounts = {};

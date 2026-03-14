@@ -15,6 +15,24 @@
 
 import logger from "../core/logger.js";
 
+/** Retry a KV put on 429 rate-limit errors with exponential backoff. */
+async function kvPutRetry(kv, key, value, options = {}, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await kv.put(key, value, options);
+      return;
+    } catch (err) {
+      const is429 =
+        err.message?.includes("429") ||
+        err.message?.toLowerCase().includes("rate limit");
+      if (!is429 || attempt >= maxRetries) throw err;
+      await new Promise((r) =>
+        setTimeout(r, Math.pow(2, attempt) * 100 + Math.random() * 100),
+      );
+    }
+  }
+}
+
 /** Rolling window size (last N evaluated scores). */
 const WINDOW_SIZE = 200;
 
@@ -64,10 +82,12 @@ async function saveWindow(kv, window) {
   _cachedWindow = window;
 
   try {
-    await kv.put(WINDOW_KEY, JSON.stringify(window), {
+    await kvPutRetry(kv, WINDOW_KEY, JSON.stringify(window), {
       expirationTtl: THRESHOLD_TTL,
     });
-  } catch { }
+  } catch (err) {
+    logger.warn(`[Threshold] Failed to save score window to KV: ${err.message}`);
+  }
 }
 
 async function readEffective(kv, configDefault) {
@@ -93,10 +113,12 @@ async function saveEffective(kv, value) {
   _cachedEffective = value;
 
   try {
-    await kv.put(EFFECTIVE_KEY, String(value), {
+    await kvPutRetry(kv, EFFECTIVE_KEY, String(value), {
       expirationTtl: THRESHOLD_TTL,
     });
-  } catch { }
+  } catch (err) {
+    logger.warn(`[Threshold] Failed to save effective threshold to KV: ${err.message}`);
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -207,7 +229,7 @@ export async function recordJobScoresBatch(kv, scores) {
       const bucket = Math.floor(Math.max(0, Math.min(99, s)) / 10) * 10;
       hist[bucket] = (hist[bucket] || 0) + 1;
     }
-    await kv.put("metrics:score_histogram", JSON.stringify(hist), {
+    await kvPutRetry(kv, "metrics:score_histogram", JSON.stringify(hist), {
       expirationTtl: 86400 * 2,
     });
   } catch (err) {

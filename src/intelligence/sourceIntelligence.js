@@ -429,8 +429,8 @@ export async function detectHiringVelocitySurge(db) {
             ).bind(src.url)
         );
 
-        for (let i = 0; i < stmts.length; i += 100) {
-            await db.batch(stmts.slice(i, i + 100));
+        for (let i = 0; i < stmts.length; i += 40) {
+            await db.batch(stmts.slice(i, i + 40));
         }
 
         if (stmts.length > 0) {

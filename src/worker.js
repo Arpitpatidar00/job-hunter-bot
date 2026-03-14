@@ -17,6 +17,7 @@ import { validateEnv } from "./env.ts";
 import { runAllConnectors } from "./connectors/index.js";
 import { buildSourceList } from "./connectors/base.js";
 import { TopKChunks } from "./core/heap.js";
+import { extractSalaryUSD } from "./core/utils.js";
 import {
   scoreJob,
   isNewJob,
@@ -35,9 +36,7 @@ import {
   batchMarkAlertSent,
   recordTermFrequencies,
   getGlobalTermFrequencies,
-  updateSourceStats,
   batchUpdateSourceStats,
-  registerDiscoveredSource,
   batchRegisterDiscoveredSources,
   getSourceMetrics,
   getEnabledSources,
@@ -46,13 +45,9 @@ import {
   cleanupStaleAlerts,
 } from "./db/index.js";
 
-// Missing import fix for ReferenceError in Queue worker
-import { trackScoreDistribution } from "./intelligence/dailyReport.js";
-
 // Source discovery + Self-expanding engine
 import { detectAtsSourcesWithDomains } from "./discovery/sourceDiscovery.js";
 import {
-  registerDomain,
   batchRegisterDomains,
   getPendingDomains,
   probeDomainsForCareers,
@@ -98,7 +93,6 @@ import {
 import {
   chunkTexts,
   embedChunks,
-  retrieveRelevant,
   resetAiCallCount,
 } from "./notifications/ai-v4.js";
 
@@ -148,10 +142,6 @@ async function saveStressTestLog(env, reportData) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 // ── Module-Level Config Cache ─────────────────────────────────────────────────
 /** Cache loadConfig() at module level so it's not re-parsed every invocation. */
 let _cachedConfig = null;
@@ -173,7 +163,7 @@ const _regexCache = new Map();
 function getCachedRegex(keyword) {
   if (_regexCache.has(keyword)) return _regexCache.get(keyword);
   try {
-    const re = new RegExp(`\\b${escapeRegex(keyword)}\\b`, 'i');
+    const re = new RegExp(`\\b${escapeRegex(keyword)}\\b`, "i");
     _regexCache.set(keyword, re);
     return re;
   } catch {
@@ -313,7 +303,7 @@ function computeQuickKeywordScore(job, config) {
  * @param {number} [baseDelayMs=500] - Base delay in ms (doubles each attempt)
  * @returns {Promise<any>}
  */
-async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
+async function withRetry(fn, maxRetries = 5, baseDelayMs = 1000) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -321,7 +311,8 @@ async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
     } catch (err) {
       lastErr = err;
       if (attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 100;
+        // Higher jitter and base delay for Rate Limiting robustness
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
         logger.warn(
           `[Retry] Attempt ${attempt + 1}/${maxRetries + 1} failed (${err.message}), retrying in ${Math.round(delay)}ms...`,
         );
@@ -363,8 +354,8 @@ function deferIO(ctx, promise, label = "deferred") {
 async function evaluateJobsFallback(jobs, env, ctx) {
   const fakeMessages = jobs.map((job) => ({
     body: job,
-    ack() { },
-    retry() { },
+    ack() {},
+    retry() {},
   }));
   await evaluateJobs(fakeMessages, env, ctx);
 }
@@ -385,7 +376,7 @@ function slimJob(job) {
     categories: job.categories,
     matchedTerms: job.matchedTerms,
     content_hash: job.content_hash,
-    contentSnippet: job.contentSnippet || '',
+    contentSnippet: job.contentSnippet || "",
     sourceUrl: job.sourceUrl,
     publishedAt: job.publishedAt,
     isoDate: job.isoDate,
@@ -500,7 +491,7 @@ async function processFeeds(messages, env, ctx) {
   await Promise.allSettled([
     ...feedResultPromises,
     batchUpdateSourceStats(env.DB, sourceStatsList).catch((err) =>
-      logger.warn(`[Fetcher] batchUpdateSourceStats failed: ${err.message}`)
+      logger.warn(`[Fetcher] batchUpdateSourceStats failed: ${err.message}`),
     ),
   ]);
 
@@ -536,14 +527,14 @@ async function processFeeds(messages, env, ctx) {
   // Fix 12+13: Enhanced metrics — always log performance breakdown
   logger.info(
     `[Metrics] processFeeds: total=${(perfEnd - perfStart).toFixed(0)}ms | ` +
-    `rawJobs=${jobs.length} deduped=${dedupedJobs.length} | ` +
-    `identityDupes=${identityDupes} contentDupes=${contentDupes} totalInMemory=${inMemoryDupes}`,
+      `rawJobs=${jobs.length} deduped=${dedupedJobs.length} | ` +
+      `identityDupes=${identityDupes} contentDupes=${contentDupes} totalInMemory=${inMemoryDupes}`,
   );
   for (const fs of feedStats) {
     logger.info(
-      `[Metrics] source=${fs.type || 'unknown'}:${fs.name || fs.url} | ` +
-      `fetched=${fs.count || 0} cursorSkipped=${fs.cursorSkipped || 0} ` +
-      `error=${fs.error || 'none'} durationMs=${fs.durationMs || 0}`,
+      `[Metrics] source=${fs.type || "unknown"}:${fs.name || fs.url} | ` +
+        `fetched=${fs.count || 0} cursorSkipped=${fs.cursorSkipped || 0} ` +
+        `error=${fs.error || "none"} durationMs=${fs.durationMs || 0}`,
     );
   }
 
@@ -594,14 +585,12 @@ async function processFeeds(messages, env, ctx) {
         else if (/\bhybrid\b/.test(jobText)) hybridJobs++;
         else onsiteJobs++;
 
-        // Salary tracking
-        const salaryMatch = jobText.match(/\$([\d,]+)/g);
-        if (salaryMatch) {
-          const val = parseInt(salaryMatch[0].replace(/[$,]/g, ""), 10);
-          if (val > 1000 && val < 1_000_000) {
-            salarySum += val;
-            salaryCount++;
-          }
+        // Salary tracking — use robust extractSalaryUSD (same as scoring engine)
+        const salaryData = extractSalaryUSD(jobText);
+        if (salaryData && salaryData.min >= 10_000) {
+          const avg = Math.round((salaryData.min + salaryData.max) / 2);
+          salarySum += avg;
+          salaryCount++;
         }
       }
 
@@ -618,7 +607,7 @@ async function processFeeds(messages, env, ctx) {
       // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost.
       // Issue 4: slimJob() strips heavy text fields to stay under 128KB limit.
       // Issue 3: withRetry() absorbs Cloudflare Queue rate-limit errors before fallback.
-      const JOB_CHUNK_SIZE = 50;
+      const JOB_CHUNK_SIZE = 10;
       let queueMsgs = 0;
       let jobQueueSuccess = false;
       try {
@@ -631,7 +620,7 @@ async function processFeeds(messages, env, ctx) {
         for (const batch of batches) {
           const messages = batch.map((job) => ({ body: job }));
           await withRetry(() => env.JOB_QUEUE.sendBatch(messages));
-          await new Promise((r) => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 1000));
           queueMsgs += messages.length;
         }
 
@@ -677,10 +666,25 @@ async function processFeeds(messages, env, ctx) {
       // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
       if (!jobQueueSuccess && newJobs.length > 0) {
         try {
-          await evaluateJobsFallback(newJobs, env, ctx);
+          // FIX: Limit direct evaluation to top 10 jobs max to avoid exceeding CPU time limits
+          const fallbackJobs = newJobs.slice(0, 10);
           logger.info(
-            `[Fetcher] Direct evaluation completed for ${newJobs.length} jobs`,
+            `[Fetcher] JOB_QUEUE failed. Critically evaluating top ${fallbackJobs.length} jobs directly...`,
           );
+          if (ctx && ctx.waitUntil) {
+            ctx.waitUntil(
+              evaluateJobsFallback(fallbackJobs, env, ctx).catch((evalErr) =>
+                logger.error(
+                  `[Fetcher] Deferred eval fallback failed: ${evalErr.message}`,
+                ),
+              ),
+            );
+          } else {
+            await evaluateJobsFallback(fallbackJobs, env, ctx);
+            logger.info(
+              `[Fetcher] Direct evaluation completed for ${fallbackJobs.length} jobs`,
+            );
+          }
         } catch (evalErr) {
           logger.error(
             `[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`,
@@ -796,16 +800,26 @@ async function processFeeds(messages, env, ctx) {
         `[Fetcher] Harvest complete. Inserted ${newlyInsertedCount} new jobs (${duplicateCount} dupes filtered).`,
       );
 
-      // Fix: Only ack messages AFTER D1 insert succeeds. 
+      // Fix: Only ack messages AFTER D1 insert succeeds.
       // If D1 insert failed (newlyInsertedCount lost), retry the messages.
       for (const msg of messages) {
-        try { msg.ack(); } catch { /* already acked */ }
+        try {
+          msg.ack();
+        } catch {
+          /* already acked */
+        }
       }
     })().catch((criticalErr) => {
       // If the entire waitUntil block fails, retry messages so jobs aren't lost
-      logger.error(`[Fetcher] Critical error in waitUntil — retrying messages: ${criticalErr.message}`);
+      logger.error(
+        `[Fetcher] Critical error in waitUntil — retrying messages: ${criticalErr.message}`,
+      );
       for (const msg of messages) {
-        try { msg.retry(); } catch { /* already acked/retried */ }
+        try {
+          msg.retry();
+        } catch {
+          /* already acked/retried */
+        }
       }
     }),
   );
@@ -976,6 +990,10 @@ async function evaluateJobs(messages, env, ctx) {
       // Batch KV write - collect instead of per-job write
       scoresToBatch.push(scoreResult.score);
 
+      // Track ALL evaluated scores (not just alerted) for accurate daily metrics
+      scoreSum += scoreResult.score;
+      scoreMax = Math.max(scoreMax, scoreResult.score);
+
       for (const profile of activeProfiles) {
         const threshold = profile.notification_threshold || globalThreshold;
 
@@ -1001,7 +1019,7 @@ async function evaluateJobs(messages, env, ctx) {
             url: job.url || job.link,
             link: job.link,
             categories: job.categories,
-            contentSnippet: (job.contentSnippet || '').slice(0, 300),
+            contentSnippet: (job.contentSnippet || "").slice(0, 300),
             sourceUrl: job.sourceUrl,
             isoDate: job.isoDate,
           };
@@ -1046,9 +1064,6 @@ async function evaluateJobs(messages, env, ctx) {
 
         // Score distribution tracking is now batched in recordJobScoresBatch
         // (removed per-alert inline trackScoreDistribution to eliminate duplicate KV writes)
-
-        scoreSum += scoreResult.score;
-        scoreMax = Math.max(scoreMax, scoreResult.score);
       }
     }
 
@@ -1107,25 +1122,17 @@ async function evaluateJobs(messages, env, ctx) {
           `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
         );
       } catch (err) {
-        logger.warn(
-          `[Evaluator] Batch chunk insert failed: ${err.message}`,
-        );
+        logger.warn(`[Evaluator] Batch chunk insert failed: ${err.message}`);
       }
     }
 
     // ── Auto-adjust threshold for next run based on this run's match count ──
     try {
-      await getEffectiveThreshold(
-        env.SEEN_JOBS,
-        config.notificationThreshold,
-        {
-          matchedLastRun: alertsQueued,
-        },
-      );
+      await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold, {
+        matchedLastRun: alertsQueued,
+      });
     } catch (err) {
-      logger.warn(
-        `[Evaluator] Threshold auto-adjust failed: ${err.message}`,
-      );
+      logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`);
     }
 
     // ── Daily Metrics ──────────────────────────────────────────────────────
@@ -1133,14 +1140,13 @@ async function evaluateJobs(messages, env, ctx) {
       await incrementDailyMetrics(env.DB, {
         ai_calls: aiCallsCount,
         worker_invocations: 1,
+        jobs_evaluated: jobsEvaluated,
         queue_messages: alertsQueued,
         score_sum: scoreSum,
         score_max: scoreMax,
       });
     } catch (err) {
-      logger.error(
-        `[Evaluator] Daily metrics update failed: ${err.message}`,
-      );
+      logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
     }
   }
 
@@ -1278,13 +1284,13 @@ async function _scheduledImpl(event, env, ctx) {
   try {
     const batchMessages = sourcesToCrawl.map((s) => ({ body: s }));
     const batches = [];
-    for (let i = 0; i < batchMessages.length; i += 50) {
-      batches.push(batchMessages.slice(i, i + 50));
+    for (let i = 0; i < batchMessages.length; i += 10) {
+      batches.push(batchMessages.slice(i, i + 10));
     }
 
     for (const batch of batches) {
       await withRetry(() => env.FEED_QUEUE.sendBatch(batch));
-      await new Promise((r) => setTimeout(r, 200)); // Pace queue sends
+      await new Promise((r) => setTimeout(r, 1000)); // Pace queue sends
     }
     logger.info(
       `[Producer] Successfully queued ${sourcesToCrawl.length} sources`,
@@ -1297,42 +1303,43 @@ async function _scheduledImpl(event, env, ctx) {
   }
 
   // ── DIRECT FALLBACK: Process feeds inline when queues are rate-limited ──
-  // Use a wall-time guard to stop before the Worker timeout (30s for cron on free tier)
   if (!queueSuccess) {
+    // FIX: Parsing all sources inline will immediately exceed the 10ms-50ms CPU limit of Workers.
+    // Instead we only process the top 3 highest priority feeds directly, and let the next cron cycle
+    // pick up the rest.
     const directStart = Date.now();
-    const WALL_TIME_LIMIT_MS = 25_000; // Stop before 30s Worker timeout
-    const DIRECT_BATCH_SIZE = 5; // Smaller batches for faster turnaround
+    const DIRECT_BATCH_SIZE = 3;
     let directProcessed = 0;
     logger.info(
-      `[Producer] Direct mode: processing ${sourcesToCrawl.length} sources inline...`,
+      `[Producer] Direct mode: processing top ${DIRECT_BATCH_SIZE} priority sources inline to avoid exceededCpu...`,
     );
-    const fakeMessages = sourcesToCrawl.map((s) => ({
-      body: s,
-      ack() { },
-      retry() { },
-    }));
-    for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
-      if (Date.now() - directStart > WALL_TIME_LIMIT_MS) {
-        logger.warn(
-          `[Producer] Wall-time guard: processed ${directProcessed}/${sourcesToCrawl.length} sources in ${((Date.now() - directStart) / 1000).toFixed(1)}s, deferring rest to next cycle.`,
+    const fakeMessages = sourcesToCrawl
+      .slice(0, DIRECT_BATCH_SIZE)
+      .map((s) => ({
+        body: s,
+        ack() {},
+        retry() {},
+      }));
+
+    try {
+      if (ctx && ctx.waitUntil) {
+        ctx.waitUntil(
+          processFeeds(fakeMessages, env, ctx).catch((err) =>
+            logger.error(
+              `[Producer] Deferred direct batch failed: ${err.message}`,
+            ),
+          ),
         );
-        break;
+      } else {
+        await processFeeds(fakeMessages, env, ctx);
       }
-      try {
-        await processFeeds(
-          fakeMessages.slice(i, i + DIRECT_BATCH_SIZE),
-          env,
-          ctx,
-        );
-        directProcessed += Math.min(DIRECT_BATCH_SIZE, fakeMessages.length - i);
-      } catch (err) {
-        logger.error(
-          `[Producer] Direct batch ${Math.floor(i / DIRECT_BATCH_SIZE)} failed: ${err.message}`,
-        );
-      }
+      directProcessed = fakeMessages.length;
+    } catch (err) {
+      logger.error(`[Producer] Direct batch failed: ${err.message}`);
     }
+
     logger.info(
-      `[Producer] Direct processing: ${directProcessed}/${sourcesToCrawl.length} sources completed.`,
+      `[Producer] Direct processing dispatched: ${directProcessed} critical sources (rest omitted).`,
     );
   }
 
@@ -1634,8 +1641,8 @@ export default {
           const DIRECT_BATCH_SIZE = 5;
           const fakeMessages = allSources.map((s) => ({
             body: s,
-            ack() { },
-            retry() { },
+            ack() {},
+            retry() {},
           }));
           for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
             if (Date.now() - startTime > WALL_TIME_LIMIT_MS) {

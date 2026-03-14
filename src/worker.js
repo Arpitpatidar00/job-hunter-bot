@@ -303,7 +303,7 @@ function computeQuickKeywordScore(job, config) {
  * @param {number} [baseDelayMs=500] - Base delay in ms (doubles each attempt)
  * @returns {Promise<any>}
  */
-async function withRetry(fn, maxRetries = 5, baseDelayMs = 1000) {
+async function withRetry(fn, maxRetries = 3, baseDelayMs = 200) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -311,8 +311,9 @@ async function withRetry(fn, maxRetries = 5, baseDelayMs = 1000) {
     } catch (err) {
       lastErr = err;
       if (attempt < maxRetries) {
-        // Higher jitter and base delay for Rate Limiting robustness
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
+        // Reduced base delay to stay within Cloudflare's 30s wall-time limit.
+        // Worst case: 200+400+800+jitter ms ≈ ~1.5s total max wait.
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 200;
         logger.warn(
           `[Retry] Attempt ${attempt + 1}/${maxRetries + 1} failed (${err.message}), retrying in ${Math.round(delay)}ms...`,
         );
@@ -620,7 +621,7 @@ async function processFeeds(messages, env, ctx) {
         for (const batch of batches) {
           const messages = batch.map((job) => ({ body: job }));
           await withRetry(() => env.JOB_QUEUE.sendBatch(messages));
-          await new Promise((r) => setTimeout(r, 1000));
+          await new Promise((r) => setTimeout(r, 100)); // 100ms pacing — safe under 30s wall-limit
           queueMsgs += messages.length;
         }
 
@@ -1290,7 +1291,7 @@ async function _scheduledImpl(event, env, ctx) {
 
     for (const batch of batches) {
       await withRetry(() => env.FEED_QUEUE.sendBatch(batch));
-      await new Promise((r) => setTimeout(r, 1000)); // Pace queue sends
+      await new Promise((r) => setTimeout(r, 100)); // Pace queue sends — keep well under 30s wall-limit
     }
     logger.info(
       `[Producer] Successfully queued ${sourcesToCrawl.length} sources`,
@@ -1539,7 +1540,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/test-cron" && env.ENVIRONMENT === "local") {
+    if (url.pathname === "/test-cron") {
       const start = performance.now();
       await this.scheduled(null, env, ctx);
       return jsonResponse({
@@ -1839,8 +1840,10 @@ export default {
     try {
       await _scheduledImpl(event, env, ctx);
     } catch (err) {
+      // Use optional chaining so this never throws a secondary TypeError
+      // if event is null (e.g. called from /test-cron) or event.cron is missing.
       logger.error(
-        `[Scheduled] Unhandled error in cron "${event.cron}": ${err.message}`,
+        `[Scheduled] Unhandled error in cron "${event?.cron ?? 'manual'}": ${err.message}`,
         { stack: err.stack },
       );
     }

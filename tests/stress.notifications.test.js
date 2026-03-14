@@ -163,7 +163,7 @@ describe('🟠 STRESS: Multi-profile × Multi-job combinatorial alert coverage',
                         return null;
                     },
                     async run() {
-                        if (sql.includes('INSERT OR IGNORE INTO sent_alerts')) {
+                        if (sql.includes('sent_alerts')) {
                             const [jobId, profileId] = this._bindings;
                             sentSet.add(`${jobId}:${profileId}`);
                         }

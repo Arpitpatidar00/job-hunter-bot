@@ -122,6 +122,20 @@ function makeMockDb({ fkFailJobIds = new Set(), existingJobIds = new Set() } = {
                 bind(...args) { this._bindings = args; return this; },
                 async run() {
                     writeCount++;
+                    // Exact match for the new robust SQL pattern
+                    if (sql.includes('sent_alerts') && (sql.includes('INSERT') || sql.includes('SELECT'))) {
+                        const jobId = this._bindings[0];
+                        const profileId = this._bindings[1];
+                        
+                        // FK guard simulation
+                        if (fkFailJobIds.has(jobId)) {
+                            return { success: true, meta: { changes: 0 } };
+                        }
+                        
+                        sentAlerts.set(`${jobId}:${profileId}`, true);
+                        return { success: true, meta: { changes: 1 } };
+                    }
+                    
                     if (sql.includes('INSERT OR IGNORE INTO jobs')) {
                         const [id, url, hash] = this._bindings;
                         if (!jobs.has(hash)) {
@@ -129,11 +143,6 @@ function makeMockDb({ fkFailJobIds = new Set(), existingJobIds = new Set() } = {
                             return { success: true, meta: { changes: 1 } };
                         }
                         return { success: true, meta: { changes: 0 } };
-                    }
-                    if (sql.includes('INSERT OR IGNORE INTO sent_alerts')) {
-                        const [jobId, profileId] = this._bindings;
-                        sentAlerts.set(`${jobId}:${profileId}`, true);
-                        return { success: true, meta: { changes: 1 } };
                     }
                     return { success: true, meta: { changes: 1 } };
                 },

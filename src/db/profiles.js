@@ -66,24 +66,17 @@ export async function hasSentAlert(db, jobId, profileId) {
  */
 export async function markAlertSent(db, jobId, profileId) {
   try {
-    // Guard: only insert if the job row still exists (prevents FK violation)
-    const jobExists = await db
-      .prepare(`SELECT 1 FROM jobs WHERE id = ? LIMIT 1`)
-      .bind(jobId)
-      .first();
-
-    if (!jobExists) {
-      logger.warn(
-        `[D1] markAlertSent skipped: job ${jobId} not found in jobs table (FK guard)`,
-      );
-      return;
-    }
-
     await db
       .prepare(
-        `INSERT OR IGNORE INTO sent_alerts (job_id, profile_id) VALUES (?, ?)`,
+        `
+        INSERT INTO sent_alerts (job_id, profile_id)
+        SELECT ?, ?
+        WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ?)
+          AND EXISTS (SELECT 1 FROM profiles WHERE id = ?)
+        ON CONFLICT DO NOTHING
+        `,
       )
-      .bind(jobId, profileId)
+      .bind(jobId, profileId, jobId, profileId)
       .run();
   } catch (err) {
     logger.error(`[D1] Failed to mark alert sent: ${err.message}`);
@@ -144,30 +137,22 @@ export async function batchMarkAlertSent(db, alertPairs) {
   if (!alertPairs || alertPairs.length === 0) return;
 
   try {
-    // Collect all jobIds to check FK constraints in bulk
-    const jobIds = [...new Set(alertPairs.map((a) => a.jobId))];
-    const placeholders = jobIds.map(() => "?").join(",");
-    const existingJobsResult = await db
-      .prepare(`SELECT id FROM jobs WHERE id IN (${placeholders})`)
-      .bind(...jobIds)
-      .all();
-
-    const existingJobs = new Set(
-      (existingJobsResult.results || []).map((r) => r.id),
-    );
-
-    // Filter valid pairs and create statements
-    const validPairs = alertPairs.filter((p) => existingJobs.has(p.jobId));
-    if (validPairs.length === 0) return;
-
-    const stmts = validPairs.map((pair) =>
+    // Filter valid pairs and create statements using EXISTS guards for maximum safety
+    const stmts = alertPairs.map((pair) =>
       db
         .prepare(
-          `INSERT OR IGNORE INTO sent_alerts (job_id, profile_id) VALUES (?, ?)`,
+          `
+          INSERT INTO sent_alerts (job_id, profile_id)
+          SELECT ?, ?
+          WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ?)
+            AND EXISTS (SELECT 1 FROM profiles WHERE id = ?)
+          ON CONFLICT DO NOTHING
+          `,
         )
-        .bind(pair.jobId, pair.profileId),
+        .bind(pair.jobId, pair.profileId, pair.jobId, pair.profileId),
     );
 
+    // Filter out potential null statements if necessary (though alertPairs is mapped 1:1 here)
     // Execute in batches of 40 (inside D1 batch limits)
     for (let i = 0; i < stmts.length; i += 40) {
       await db.batch(stmts.slice(i, i + 40));

@@ -1,7 +1,7 @@
 -- Job Hunter Bot v5 D1 Schema (Phase 8 - Expansion Tuning)
--- Adds dedup ratio tracking and discovery timestamp for exploration bonus.
+-- Adds discovery timestamp for exploration bonus.
+-- NOTE: dup_ratio already added in 0007_dup_ratio_tracking.sql
 
-ALTER TABLE source_registry ADD COLUMN dup_ratio REAL DEFAULT 0;
 ALTER TABLE source_registry ADD COLUMN discovered_at DATETIME DEFAULT NULL;
 
 -- Backfill existing sources with current timestamp

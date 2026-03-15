@@ -22,8 +22,13 @@
 	//   :10/:25/:40/:55 → Batch 2
 	"triggers": {
 		"crons": [
-			// Scheduled producer cron trigger (fires event to fetch feeds)
-			"0,15,30,45 * * * *"
+			// Fix 2: Staggered cron batches for distributed crawl workload
+			// Batch 0: :00,:15,:30,:45 — high-priority sources
+			"0,15,30,45 * * * *",
+			// Batch 1: :05,:20,:35,:50 — medium-priority sources
+			"5,20,35,50 * * * *",
+			// Batch 2: :10,:25,:40,:55 — low-priority + exploration sources
+			"10,25,40,55 * * * *"
 		]
 	},
 	"kv_namespaces": [
@@ -59,20 +64,21 @@
 		// Queue Consumers (Worker receives messages FROM these)
 		"consumers": [
 			{
+				// Fix 4: Increased batch size from 5→10 to reduce worker overhead (8 invocations → 4)
 				"queue": "feed-queue",
-				"max_batch_size": 5,
+				"max_batch_size": 10,
 				"max_batch_timeout": 2,
 				"max_retries": 2
 			},
 			{
 				"queue": "job-queue",
-				"max_batch_size": 5,
+				"max_batch_size": 10,
 				"max_batch_timeout": 2,
 				"max_retries": 3
 			},
 			{
 				"queue": "alert-queue",
-				"max_batch_size": 5,
+				"max_batch_size": 10,
 				"max_batch_timeout": 2,
 				"max_retries": 5
 			}

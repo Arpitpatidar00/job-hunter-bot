@@ -3,7 +3,7 @@
 ## Overview
 
 This document provides an expert-level analysis of the system's current architecture, identifying performance bottlenecks, scalability risks, resource waste, and concrete improvement recommendations.
-
+> **v5.3 Status:** All critical issues and key risks have been resolved. See [step15.md](./step15.md) for implementation details.
 ---
 
 ## 13.1 ✅ What Works Well (Strengths)
@@ -27,6 +27,8 @@ This document provides an expert-level analysis of the system's current architec
 
 ### Issue 1: KV Write Volume Exceeds Free Tier
 
+> **✅ FIXED in v5.3** — Feed health, threshold state, and score histogram migrated from KV to D1. KV writes reduced from ~4,876 to ~192/day. See [step15 Fix 1](./step15.md#fix-1--kv-write-volume-migrated-to-d1).
+
 **Problem:** Current operations sum to ~4,876 KV writes/day vs. 1,000/day free limit.
 
 **Root Cause:** Per-feed circuit breaker writes (40 writes × 96 cron = 3,840/day) dominate the budget.
@@ -47,6 +49,8 @@ Option B: Upgrade to Workers Paid plan (~$5/mo)
 
 ### Issue 2: Feed Queue Batch Size Is Too Small
 
+> **✅ FIXED in v5.3** — All queue `max_batch_size` increased from 5 to 10. Worker invocations halved. See [step15 Fix 4](./step15.md#fix-4--queue-batch-size-increased).
+
 **Problem:** `max_batch_size: 5` for `feed-queue` means 8 separate Worker invocations per cron to process 40 sources. Each invocation has overhead.
 
 **Fix:** Increase to `max_batch_size: 10`:
@@ -59,6 +63,8 @@ Option B: Upgrade to Workers Paid plan (~$5/mo)
 ---
 
 ### Issue 3: AI Chunk Storage Growing Unboundedly
+
+> **✅ FIXED in v5.3** — Job chunks are now in-memory only; D1 writes for chunks removed entirely. See [step15 Fix 3](./step15.md#fix-3--job-chunk-storage-removed).
 
 **Problem:** `job_chunks` TTL is 7 days. At 100 jobs/day × 5 chunks each = 500 rows/day × 7 days = **3,500 rows** always present.
 
@@ -75,6 +81,8 @@ Option B: Upgrade to Workers Paid plan (~$5/mo)
 ---
 
 ### Issue 4: Single Cron Expression — No True Batch Stagger
+
+> **✅ FIXED in v5.3** — Three staggered cron expressions added. Each trigger processes only 1/3 of sources. See [step15 Fix 2](./step15.md#fix-2--true-cron-batch-staggering).
 
 **Problem:** The `batcher.js` logic maps cron minute → batch ID, but the current `wrangler.jsonc` only has ONE cron expression (`0,15,30,45 * * * *`). All triggers are batch 0 since minutes `:00/:15/:30/:45` always map to `batchId=0`.
 
@@ -94,6 +102,8 @@ Option B: Upgrade to Workers Paid plan (~$5/mo)
 ## 13.3 🟡 Scalability Risks
 
 ### Risk 1: Search Expansion Has No Per-Query Caching
+
+> **✅ FIXED in v5.3** — KV-backed 24h query cache added via `searchWithCache()`. See [step15 Fix 5](./step15.md#fix-5--search-discovery-caching).
 
 `runSearchExpansion()` re-queries Bing/Brave for the same queries every 8 cycles. Companies like Stripe and Vercel appear in queries repeatedly.
 
@@ -131,6 +141,8 @@ const cacheKey = `profile:embedding:${profileHash}`;
 
 ### Risk 4: No Alerting on Queue Backlog Buildup
 
+> **✅ FIXED in v5.3** — Queue depth monitoring added to `evaluateJobs()`. When batch >200, AI scoring disabled and keyword-only fallback activates. See [step15 Fix 7](./step15.md#fix-7--queue-depth-monitoring).
+
 If `evaluateJobs()` runs slower than incoming jobs (high AI usage days), the `job-queue` can build up a backlog. There's no monitoring for this.
 
 **Fix:** Track queue depth via `incrementDailyMetrics(DB, { queue_backlog: pendingCount })` and add a dashboard warning when backlog > 100.
@@ -140,6 +152,8 @@ If `evaluateJobs()` runs slower than incoming jobs (high AI usage days), the `jo
 ## 13.4 🟡 Resource Waste
 
 ### Issue 1: Daily Metrics Writes Are Redundant
+
+> **✅ FIXED in v5.3** — In-memory `bufferMetrics()` accumulates all deltas; single `flushMetricsBuffer(D1)` at handler end. ~66% fewer D1 writes. See [step15 Fix 6](./step15.md#fix-6--metrics-write-buffering).
 
 `incrementDailyMetrics()` is called multiple times per cron cycle:
 - Phase 1: after job insert
@@ -184,6 +198,9 @@ if (sources.active >= 80 && successRate >= 90) {
 ## 13.5 Design Improvements
 
 ### Improvement 1: Move Chunk Embeddings to In-Memory Only
+
+> **✅ IMPLEMENTED in v5.3** — See [step15 Fix 3](./step15.md#fix-3--job-chunk-storage-removed).
+
 - RAG v4 stores chunks in D1 but only uses them during the same `evaluateJobs()` invocation
 - Storing them wastes D1 writes with no cross-invocation reuse
 - **Implement:** Build `TopKChunks` purely in-memory, remove `job_chunks` D1 table writes

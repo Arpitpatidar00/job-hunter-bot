@@ -61,6 +61,8 @@ import {
 } from "./intelligence/sourceIntelligence.js";
 import {
   incrementDailyMetrics,
+  bufferMetrics,
+  flushMetricsBuffer,
   sendDailyReport,
   getDailyReportData,
   formatDailyReport,
@@ -70,6 +72,7 @@ import {
 import {
   isFeedCircuitOpen,
   recordFeedResult,
+  batchRecordFeedResults,
   getFeedHealthRecord,
 } from "./intelligence/feedHealth.js";
 import {
@@ -98,6 +101,7 @@ import {
 
 import { generateSimHash } from "./core/dedup.js";
 import { getGlobalMatcher } from "./scoring/fastMatcher.js";
+import { getBatchId, splitFeedsIntoBatches } from "./core/batcher.js";
 
 // ── JSON Response Helper ─────────────────────────────────────────────────────
 
@@ -355,8 +359,8 @@ function deferIO(ctx, promise, label = "deferred") {
 async function evaluateJobsFallback(jobs, env, ctx) {
   const fakeMessages = jobs.map((job) => ({
     body: job,
-    ack() {},
-    retry() {},
+    ack() { },
+    retry() { },
   }));
   await evaluateJobs(fakeMessages, env, ctx);
 }
@@ -434,7 +438,7 @@ async function processFeeds(messages, env, ctx) {
   // We import getFeedHealthRecord dynamically inside if not added at the top. Wait!
   // I need to add the import at the top of worker.js. I'll do that in another replace.
   for (const feed of batchConfig.feeds) {
-    const record = await getFeedHealthRecord(env.SEEN_JOBS, feed.url);
+    const record = await getFeedHealthRecord(env.DB, env.SEEN_JOBS, feed.url);
     if (record.circuitOpen) {
       logger.warn(`[Circuit] Skipping ${feed.url} — circuit is OPEN`);
     } else {
@@ -444,7 +448,7 @@ async function processFeeds(messages, env, ctx) {
     }
   }
   for (const src of batchConfig.sources) {
-    const record = await getFeedHealthRecord(env.SEEN_JOBS, src.url);
+    const record = await getFeedHealthRecord(env.DB, env.SEEN_JOBS, src.url);
     if (record.circuitOpen) {
       logger.warn(`[Circuit] Skipping ${src.url} — circuit is OPEN`);
     } else {
@@ -463,34 +467,35 @@ async function processFeeds(messages, env, ctx) {
     env.SEEN_JOBS,
   );
 
-  // ── Record circuit breaker metrics (batched — collect then write once) ──
+  // ── Record feed health metrics (Fix 1: batched D1 write replaces per-feed KV writes) ──
   let crawlSuccesses = 0;
   let crawlFailures = 0;
-  const feedResultPromises = [];
   const sourceStatsList = [];
+  const feedResultsForBatch = [];
 
   for (const stat of feedStats) {
-    feedResultPromises.push(
-      recordFeedResult(env.SEEN_JOBS, stat.url, {
-        success: !stat.error,
-        latencyMs: stat.durationMs || 0,
-        error: stat.error || "",
-      }).catch((err) =>
-        logger.warn(`[Fetcher] recordFeedResult failed: ${err.message}`),
-      ),
-    );
+    feedResultsForBatch.push({
+      url: stat.url,
+      success: !stat.error,
+      latencyMs: stat.durationMs || 0,
+      error: stat.error || "",
+    });
     if (!stat.error) crawlSuccesses++;
     else crawlFailures++;
-    // Collect stats for batch D1 write instead of individual writes
     sourceStatsList.push({
       url: stat.url,
       success: !stat.error,
       jobCount: stat.count || 0,
     });
   }
-  // Fire KV health writes + batch D1 source stats in parallel
+  // Fire D1 health writes + batch D1 source stats in parallel
   await Promise.allSettled([
-    ...feedResultPromises,
+    batchRecordFeedResults(env.DB, env.SEEN_JOBS, feedResultsForBatch).catch(
+      (err) =>
+        logger.warn(
+          `[Fetcher] batchRecordFeedResults failed: ${err.message}`,
+        ),
+    ),
     batchUpdateSourceStats(env.DB, sourceStatsList).catch((err) =>
       logger.warn(`[Fetcher] batchUpdateSourceStats failed: ${err.message}`),
     ),
@@ -528,14 +533,14 @@ async function processFeeds(messages, env, ctx) {
   // Fix 12+13: Enhanced metrics — always log performance breakdown
   logger.info(
     `[Metrics] processFeeds: total=${(perfEnd - perfStart).toFixed(0)}ms | ` +
-      `rawJobs=${jobs.length} deduped=${dedupedJobs.length} | ` +
-      `identityDupes=${identityDupes} contentDupes=${contentDupes} totalInMemory=${inMemoryDupes}`,
+    `rawJobs=${jobs.length} deduped=${dedupedJobs.length} | ` +
+    `identityDupes=${identityDupes} contentDupes=${contentDupes} totalInMemory=${inMemoryDupes}`,
   );
   for (const fs of feedStats) {
     logger.info(
       `[Metrics] source=${fs.type || "unknown"}:${fs.name || fs.url} | ` +
-        `fetched=${fs.count || 0} cursorSkipped=${fs.cursorSkipped || 0} ` +
-        `error=${fs.error || "none"} durationMs=${fs.durationMs || 0}`,
+      `fetched=${fs.count || 0} cursorSkipped=${fs.cursorSkipped || 0} ` +
+      `error=${fs.error || "none"} durationMs=${fs.durationMs || 0}`,
     );
   }
 
@@ -637,11 +642,10 @@ async function processFeeds(messages, env, ctx) {
         );
       }
 
-      // ── Daily Metrics (ONE aggregated write instead of per-job) ────────────
-      // Write metrics IMMEDIATELY after job processing, BEFORE evaluateJobs fallback.
-      // This ensures metrics are recorded even if the Worker is killed during evaluation.
+      // ── Daily Metrics (ONE aggregated write buffered in memory — Fix 6) ────────────
+      // Buffer metrics instead of writing immediately. Flush at end of handler.
       try {
-        await incrementDailyMetrics(env.DB, {
+        bufferMetrics({
           sources_scanned: allSources.length,
           crawl_successes: crawlSuccesses,
           crawl_failures: crawlFailures,
@@ -782,10 +786,10 @@ async function processFeeds(messages, env, ctx) {
         }
       }
 
-      // ── Daily Metrics (Phase 2: Discovery metrics) ─────────────────────────
+      // ── Daily Metrics (Phase 2: Discovery metrics — Fix 6: buffered) ─────────────
       if (newAts > 0 || newDomains > 0) {
         try {
-          await incrementDailyMetrics(env.DB, {
+          bufferMetrics({
             new_sources_ats: newAts,
             new_domains_queued: newDomains,
             d1_writes: newAts,
@@ -795,6 +799,13 @@ async function processFeeds(messages, env, ctx) {
             `[Fetcher] Daily metrics (phase 2) failed: ${err.message}`,
           );
         }
+      }
+
+      // ── Fix 6: Flush all buffered metrics to D1 in ONE batch call ─────────
+      try {
+        await flushMetricsBuffer(env.DB);
+      } catch (err) {
+        logger.error(`[Fetcher] Metrics flush failed: ${err.message}`);
       }
 
       logger.info(
@@ -834,6 +845,23 @@ async function evaluateJobs(messages, env, ctx) {
   // Issue 1: Tightened from 25s→22s to give larger margin before the 30s hard kill
   const WALL_TIME_LIMIT_MS = 22_000;
 
+  // ── Fix 7: Queue Depth Monitoring ──────────────────────────────────────
+  // Count total pending jobs in this batch to detect backlog accumulation.
+  // If backlog is large (>200 jobs in a single batch), disable AI scoring
+  // and use keyword-only scoring to maintain responsiveness.
+  let totalJobsInBatch = 0;
+  for (const msg of messages) {
+    const msgJobs = msg.body.jobs || [msg.body];
+    totalJobsInBatch += msgJobs.length;
+  }
+  const QUEUE_DEPTH_THRESHOLD = 200;
+  const queueBacklogDetected = totalJobsInBatch > QUEUE_DEPTH_THRESHOLD;
+  if (queueBacklogDetected) {
+    logger.warn(
+      `[Evaluator] Queue backlog detected: ${totalJobsInBatch} jobs in batch (threshold: ${QUEUE_DEPTH_THRESHOLD}). Switching to keyword-only scoring.`,
+    );
+  }
+
   // Issue 5: Reset per-invocation AI call counter at the start of each evaluateJobs run
   resetAiCallCount();
 
@@ -844,8 +872,9 @@ async function evaluateJobs(messages, env, ctx) {
 
   const prefWeights = await getPreferenceWeights(env.SEEN_JOBS);
 
+  // Fix 1: Threshold now reads from D1 instead of KV
   const thresholdContext = await getEffectiveThreshold(
-    env.SEEN_JOBS,
+    env.DB,
     config.notificationThreshold,
   );
   const globalThreshold = thresholdContext.effective;
@@ -920,12 +949,16 @@ async function evaluateJobs(messages, env, ctx) {
       const quickKeywordScore = computeQuickKeywordScore(job, config);
 
       // Skip AI embedding if keyword score is very high (>75)
+      // OR if queue backlog detected (Fix 7: fallback to keyword scoring)
       // The job likely already matches well without semantic analysis
       const SKIP_AI_THRESHOLD = 75;
       let chunkVecs = [];
       let chunks = [];
 
-      if (quickKeywordScore < SKIP_AI_THRESHOLD) {
+      if (
+        quickKeywordScore < SKIP_AI_THRESHOLD &&
+        !queueBacklogDetected
+      ) {
         // v4: Chunk the job text and get embeddings
         // Optimization: Limit chunks to 5 max to reduce CPU and AI calls
         const jobTextForAi = `${job.title} ${job.company || ""} ${job.categories?.join(" ") || ""} ${job.contentSnippet || ""}`;
@@ -1084,61 +1117,40 @@ async function evaluateJobs(messages, env, ctx) {
 
   // ── Post-evaluation cleanup (extracted to avoid duplicated code blocks) ──────
   async function postEvaluationCleanup() {
-    // Batch write all collected scores to KV (single write instead of per-job)
+    // Batch write all collected scores to D1 (Fix 1: moved from KV)
     if (scoresToBatch.length > 0) {
       try {
-        await recordJobScoresBatch(env.SEEN_JOBS, scoresToBatch);
+        await recordJobScoresBatch(env.DB, scoresToBatch);
         logger.info(
-          `[Evaluator] Batch recorded ${scoresToBatch.length} scores to KV`,
+          `[Evaluator] Batch recorded ${scoresToBatch.length} scores to D1`,
         );
       } catch (err) {
-        logger.warn(`[Evaluator] Batch KV write failed: ${err.message}`);
+        logger.warn(`[Evaluator] Batch D1 score write failed: ${err.message}`);
       }
     }
 
-    // Batch write all collected job chunks to D1 (single batch instead of per-job)
+    // Fix 3: Job chunks are NO LONGER persisted to D1.
+    // Chunks are only used in-memory during the current scoring cycle.
+    // This eliminates ~500 unnecessary D1 writes/day.
+    // (Previously: batch INSERT into job_chunks table)
     if (chunksToBatch.length > 0) {
-      try {
-        const insertStmt = env.DB.prepare(
-          "INSERT INTO job_chunks (job_hash, chunk_text, vec_json, remote_type) VALUES (?, ?, ?, ?)",
-        );
-        const allChunks = [];
-        for (const jobData of chunksToBatch) {
-          for (let i = 0; i < jobData.chunks.length; i++) {
-            allChunks.push(
-              insertStmt.bind(
-                jobData.jobId,
-                jobData.chunks[i],
-                JSON.stringify(jobData.chunkVecs[i] || []),
-                "unknown",
-              ),
-            );
-          }
-        }
-        // Batch in chunks of 40 (D1 limit)
-        for (let i = 0; i < allChunks.length; i += 40) {
-          await env.DB.batch(allChunks.slice(i, i + 40));
-        }
-        logger.info(
-          `[Evaluator] Batch inserted ${allChunks.length} chunks to D1`,
-        );
-      } catch (err) {
-        logger.warn(`[Evaluator] Batch chunk insert failed: ${err.message}`);
-      }
+      logger.info(
+        `[Evaluator] Processed ${chunksToBatch.length} job chunks in-memory (not persisted — Fix 3)`,
+      );
     }
 
-    // ── Auto-adjust threshold for next run based on this run's match count ──
+    // ── Auto-adjust threshold for next run (Fix 1: D1 instead of KV) ────
     try {
-      await getEffectiveThreshold(env.SEEN_JOBS, config.notificationThreshold, {
+      await getEffectiveThreshold(env.DB, config.notificationThreshold, {
         matchedLastRun: alertsQueued,
       });
     } catch (err) {
       logger.warn(`[Evaluator] Threshold auto-adjust failed: ${err.message}`);
     }
 
-    // ── Daily Metrics ──────────────────────────────────────────────────────
+    // ── Daily Metrics (Fix 6: buffered then flushed) ─────────────────────
     try {
-      await incrementDailyMetrics(env.DB, {
+      bufferMetrics({
         ai_calls: aiCallsCount,
         worker_invocations: 1,
         jobs_evaluated: jobsEvaluated,
@@ -1146,6 +1158,7 @@ async function evaluateJobs(messages, env, ctx) {
         score_sum: scoreSum,
         score_max: scoreMax,
       });
+      await flushMetricsBuffer(env.DB);
     } catch (err) {
       logger.error(`[Evaluator] Daily metrics update failed: ${err.message}`);
     }
@@ -1194,13 +1207,14 @@ async function sendAlerts(messages, env, ctx) {
     }
   }
 
-  // ── Daily Metrics ──────────────────────────────────────────────────────
+  // ── Daily Metrics (Fix 6: buffered then flushed) ────────────────────
   try {
-    await incrementDailyMetrics(env.DB, {
+    bufferMetrics({
       alerts_sent: sentCount,
       alert_failures: failedCount,
       worker_invocations: 1,
     });
+    await flushMetricsBuffer(env.DB);
   } catch (err) {
     logger.error(`[Sender] Daily metrics update failed: ${err.message}`);
   }
@@ -1216,7 +1230,17 @@ async function _scheduledImpl(event, env, ctx) {
   const isIntelEnabled = intel.enabled !== false;
 
   const cycleNumber = await getAndIncrementCycle(env.SEEN_JOBS);
-  logger.info(`[Producer] Cron cycle #${cycleNumber} fired.`);
+
+  // ── Fix 2: Batch staggering ─────────────────────────────────────────
+  // With 3 cron triggers (:00/:15/:30/:45, :05/:20/:35/:50, :10/:25/:40/:55),
+  // each trigger fires a different batch. This distributes crawl workload
+  // and prevents simultaneous network spikes.
+  const batchId = event?.scheduledTime
+    ? getBatchId(event.scheduledTime, 3)
+    : 0;
+  logger.info(
+    `[Producer] Cron cycle #${cycleNumber} fired (batch ${batchId}/3).`,
+  );
 
   // ── 1. Build source list: config sources + D1 registry sources ────────
   const configSources = buildSourceList(config);
@@ -1264,16 +1288,26 @@ async function _scheduledImpl(event, env, ctx) {
         .sort((a, b) => (b._priority || 50) - (a._priority || 50))
         .slice(0, MAX_SOURCES_PER_CYCLE);
 
-      sourcesToCrawl = allMerged;
+      // Fix 2: Split sources into 3 staggered batches by cron trigger
+      const batches = splitFeedsIntoBatches(allMerged, 3);
+      sourcesToCrawl = batches[batchId] || allMerged;
       logger.info(
-        `[Producer] Intelligence: ${sourcesToCrawl.length} sources selected from ${mergedMap.size} total (top ${MAX_SOURCES_PER_CYCLE} by priority)`,
+        `[Producer] Intelligence: batch ${batchId} has ${sourcesToCrawl.length} sources (${allMerged.length} total, split into ${batches.length} batches)`,
       );
     } catch (err) {
       logger.warn(`[Producer] Intelligence fallback: ${err.message}`);
-      sourcesToCrawl = allSources.slice(0, MAX_SOURCES_PER_CYCLE);
+      const fallbackBatches = splitFeedsIntoBatches(
+        allSources.slice(0, MAX_SOURCES_PER_CYCLE),
+        3,
+      );
+      sourcesToCrawl = fallbackBatches[batchId] || allSources.slice(0, MAX_SOURCES_PER_CYCLE);
     }
   } else {
-    sourcesToCrawl = allSources.slice(0, MAX_SOURCES_PER_CYCLE);
+    const staticBatches = splitFeedsIntoBatches(
+      allSources.slice(0, MAX_SOURCES_PER_CYCLE),
+      3,
+    );
+    sourcesToCrawl = staticBatches[batchId] || allSources.slice(0, MAX_SOURCES_PER_CYCLE);
   }
 
   logger.info(
@@ -1318,8 +1352,8 @@ async function _scheduledImpl(event, env, ctx) {
       .slice(0, DIRECT_BATCH_SIZE)
       .map((s) => ({
         body: s,
-        ack() {},
-        retry() {},
+        ack() { },
+        retry() { },
       }));
 
     try {
@@ -1381,7 +1415,7 @@ async function _scheduledImpl(event, env, ctx) {
           `[CareerDetector] Probed ${domains.length} domains, registered ${registered.length} career pages`,
         );
         if (registered.length > 0) {
-          await incrementDailyMetrics(env.DB, {
+          bufferMetrics({
             new_sources_career: registered.length,
           });
         }
@@ -1469,20 +1503,16 @@ async function _scheduledImpl(event, env, ctx) {
       );
       if (newAtsSources > 0 || newDomains > 0) {
         if (ctx && ctx.waitUntil) {
-          // Run metrics asynchronously without blocking the queue
-          ctx.waitUntil(
-            incrementDailyMetrics(env.DB, {
-              new_sources_search: newAtsSources,
-              new_domains_queued: newDomains,
-            }),
-          );
-        } else {
-          incrementDailyMetrics(env.DB, {
+          // Fix 6: Buffer metrics (will be flushed at end of _scheduledImpl)
+          bufferMetrics({
             new_sources_search: newAtsSources,
             new_domains_queued: newDomains,
-          }).catch((e) =>
-            logger.warn(`[SearchExpander] Failed metrics update: ${e.message}`),
-          );
+          });
+        } else {
+          bufferMetrics({
+            new_sources_search: newAtsSources,
+            new_domains_queued: newDomains,
+          });
         }
       }
     } catch (err) {
@@ -1500,13 +1530,14 @@ async function _scheduledImpl(event, env, ctx) {
     logger.warn(`[Producer] Cleanup failed: ${err.message}`);
   }
 
-  // ── Daily Metrics: track cycle ─────────────────────────────────────
-  // ── IMPORTANT: ensure this runs by blocking before cycle end!
+  // ── Daily Metrics: track cycle (Fix 6: buffered + flushed) ──────────
   try {
-    await incrementDailyMetrics(env.DB, {
+    bufferMetrics({
       cycles_completed: 1,
       worker_invocations: 1,
     });
+    // Flush ALL buffered metrics from this entire _scheduledImpl invocation
+    await flushMetricsBuffer(env.DB);
   } catch (err) {
     logger.error(`[Producer] Daily metrics update failed: ${err.message}`);
   }
@@ -1642,8 +1673,8 @@ export default {
           const DIRECT_BATCH_SIZE = 5;
           const fakeMessages = allSources.map((s) => ({
             body: s,
-            ack() {},
-            retry() {},
+            ack() { },
+            retry() { },
           }));
           for (let i = 0; i < fakeMessages.length; i += DIRECT_BATCH_SIZE) {
             if (Date.now() - startTime > WALL_TIME_LIMIT_MS) {

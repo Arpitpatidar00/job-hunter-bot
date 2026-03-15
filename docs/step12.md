@@ -23,17 +23,19 @@ The system runs entirely on Cloudflare's global edge network. Scaling is inheren
 
 ---
 
-## 12.2 Worker Invocation Math (Current Config)
+## 12.2 Worker Invocation Math (v5.3 Config)
 
 | Event | Frequency | Daily Count |
 |---|---|---|
-| Cron fires | Every 15 min | 96 |
-| processFeeds (5 sources/batch) | 8 batches × 96 = 768 | 768 |
-| evaluateJobs (5 per batch) | ~50 new jobs → 10 batches | ~960/day |
-| sendAlerts | ~8 alerts per cycle → 2 batches | ~192/day |
-| **Total invocations** | — | **~2,016/day** |
+| Cron fires (3 staggered) | Every 5 min (3 batches) | 288 |
+| processFeeds (10 sources/batch) | ~2 batches × 288 = 576 | 576 |
+| evaluateJobs (10 per batch) | ~50 new jobs → 5 batches | ~480/day |
+| sendAlerts | ~8 alerts per cycle → 1 batch | ~96/day |
+| **Total invocations** | — | **~1,440/day** |
 
-At 100,000/day free tier capacity → **~2% of free tier used**.
+At 100,000/day free tier capacity → **~1.4% of free tier used**.
+
+> **v5.3 change:** Batch size 5→10 halved processFeeds and evaluateJobs invocations. 3 cron triggers add more cron events but each processes only 1/3 of sources.
 
 ---
 
@@ -96,26 +98,25 @@ The AI skip optimization significantly reduces cost as volume grows:
 
 ---
 
-## 12.6 KV Write Budget Management
+## 12.6 KV Write Budget Management (v5.3 — Resolved)
 
-The KV free tier (1,000 writes/day) is the tightest constraint:
+The KV free tier (1,000 writes/day) was the tightest constraint. **v5.3 migrated all high-write keys to D1:**
 
-| Operation | Writes Per Cycle | Per Day (96 cycles) |
+| Operation | Writes/Day (v5.2) | Writes/Day (v5.3) |
 |---|---|---|
-| Feed circuit breaker updates | 5/batch × 8 batches = 40 | 3,840 |
-| Score histogram (batched) | 1/evaluateJobs batch | ~960 |
-| Threshold updates | 1–2 (only if changed) | ~50 |
-| Discovery stats | 1–2/expansion run | ~25 |
-| Profile embedding cache | 1/24h | 1 |
-| **Total** | | **~4,876/day** |
+| Feed health records | ~3,840 | **0** (D1) |
+| Score histogram | ~960 | **0** (D1) |
+| Threshold updates | ~50 | **0** (D1) |
+| Circuit breaker flags | ~20 | ~20 |
+| Feed cursors | ~40 | ~40 |
+| Discovery stats | ~25 | ~6 |
+| Search query cache (NEW) | 0 | ~24 |
+| Profile embedding cache | ~1 | ~20 |
+| Cycle counter | ~10 | ~10 |
+| Other (rate limits, calibration) | ~10 | ~10 |
+| **Total** | **~4,876** ❌ | **~192** ✅ |
 
-> **Exceeds free tier.** The system assumes Workers Paid Plan for KV or careful per-feature optimization.
-
-### KV Write Throttling Techniques:
-1. Batch score writes: `recordJobScoresBatch()` → 1 write for N scores
-2. Threshold: skip write if change < 2 points
-3. `kvPutRetry()` with backoff for 429 errors
-4. Discovery stats budget: `MAX_KV_WRITES_PER_RUN = 3`
+> **Result:** KV writes reduced by **96%**. System runs entirely within the free tier — no paid plan needed.
 
 ---
 
@@ -128,13 +129,16 @@ For 300 new jobs/day:
 | Job inserts | ~300 |
 | Source stats | ~96 cycles × 8 sources = ~768 |
 | Term frequencies | ~96 cycles |
+| Feed health upserts (v5.3) | ~3,840 (moved from KV) |
+| Threshold state (v5.3) | ~192 (moved from KV) |
+| Score histogram (v5.3) | ~96 (moved from KV) |
 | Source yields | ~96 cycles |
 | Alert records | ~20 |
-| Daily metrics | ~96 × 3 stages = ~288 |
-| Chunk embeddings | ~100 jobs × 5 chunks = ~500 |
-| **Total** | **~2,168/day** |
+| Daily metrics (v5.3 buffered) | ~96 (was ~288; 66% reduction via bufferMetrics) |
+| Chunk embeddings | **0** (in-memory only since v5.3; was ~500) |
+| **Total** | **~5,500/day** |
 
-Free tier: 100K writes/day → **2.2% utilized**.
+Free tier: 100K writes/day → **5.5% utilized** (increased due to KV→D1 migration, but well within limits).
 
 ---
 
@@ -158,7 +162,7 @@ If the system outgrows the current constraints:
 | Bottleneck | Solution |
 |---|---|
 | >40 high-priority sources | Increase `MAX_SOURCES_PER_CYCLE` |
-| KV write budget | Move health records to D1, keep KV for hot data only |
+| KV write budget | ✅ Resolved in v5.3 — migrated to D1 |
 | D1 storage | Add retention cleanup frequency |
 | Worker CPU | Split `evaluateJobs` into smaller units per message |
 | Alert volume | Add per-profile rate limiting |
@@ -169,22 +173,22 @@ If the system outgrows the current constraints:
 ## Flow Diagram — Scaling
 
 ```
-96 cron fires/day (every 15 min)
+288 cron fires/day (every 5 min, 3 staggered batches)
     │
-    Each cron: 40 sources → FEED_QUEUE (40 messages)
+    Each cron: ~14 sources → FEED_QUEUE (~14 messages per batch)
         │
-        8 processFeeds() invocations (5 sources each, parallel inside)
+        ~2 processFeeds() invocations (10 sources each, parallel inside)
             │
-            ~300 new jobs → JOB_QUEUE (30 messages, 10 jobs each)
+            ~100 new jobs → JOB_QUEUE (10 messages, 10 jobs each)
                 │
-                30 evaluateJobs() invocations (5 per batch)
+                10 evaluateJobs() invocations (10 per batch)
                     │
-                    ~20 qualifying jobs → ALERT_QUEUE
+                    ~7 qualifying jobs → ALERT_QUEUE
                         │
-                        4 sendAlerts() invocations (5 per batch)
+                        1 sendAlerts() invocation (10 per batch)
                             │
                             Discord + Telegram delivery
 ```
 
-**Current resource usage:** ~2% invocations, ~2.2% D1 writes, ~5× KV (requires paid plan)  
+**Current resource usage:** ~1.4% invocations, ~5.5% D1 writes, ~19% KV writes — **all within free tier ✅**  
 **Max practical scale:** ~500 sources/cycle, ~1,000 new jobs/hour before CPU constrains

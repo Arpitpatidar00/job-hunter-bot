@@ -2,36 +2,17 @@
  * @module threshold
  * @description Dynamic notification threshold engine.
  *
- * Problem: A static threshold (50) can't adapt to feed quality shifts.
- * High-quality days → threshold too low → too many alerts.
- * Dead feed days → threshold too high → zero alerts.
+ * ARCHITECTURE FIX (Issue #1): Moved from KV to D1.
+ * Eliminates ~192 KV writes/day (thresh:window + metrics:score_histogram).
  *
- * Solution: Keep a rolling window of the last N job scores in KV.
- * Compute the distribution mean and auto-adjust the threshold to maintain
- * a healthy match rate (target: ~3–8 notifications per cron run).
+ * Problem: A static threshold can't adapt to feed quality shifts.
+ * Solution: Rolling window of last N scores in D1 `threshold_state` table.
+ * Auto-adjust threshold to maintain healthy match rate (3–8 per run).
  *
- * Guardrails: threshold never goes below MIN_THRESHOLD or above MAX_THRESHOLD.
+ * Score histogram now uses D1 `score_histogram` table instead of KV.
  */
 
 import logger from "../core/logger.js";
-
-/** Retry a KV put on 429 rate-limit errors with exponential backoff. */
-async function kvPutRetry(kv, key, value, options = {}, maxRetries = 3) {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      await kv.put(key, value, options);
-      return;
-    } catch (err) {
-      const is429 =
-        err.message?.includes("429") ||
-        err.message?.toLowerCase().includes("rate limit");
-      if (!is429 || attempt >= maxRetries) throw err;
-      await new Promise((r) =>
-        setTimeout(r, Math.pow(2, attempt) * 100 + Math.random() * 100),
-      );
-    }
-  }
-}
 
 /** Rolling window size (last N evaluated scores). */
 const WINDOW_SIZE = 200;
@@ -49,190 +30,239 @@ const ADJUST_STEP = 2;
 const TARGET_MIN_MATCHES = 1;
 const TARGET_MAX_MATCHES = 8;
 
-/** KV key for the sliding window of recent scores. */
+/** D1 keys for threshold_state table. */
 const WINDOW_KEY = "thresh:window";
-
-/** KV key for the current effective threshold. */
 const EFFECTIVE_KEY = "thresh:effective";
 
-/** TTL for threshold data — 60 days. */
-const THRESHOLD_TTL = 60 * 24 * 60 * 60;
-
-/** In-memory cache for threshold values to reduce KV reads */
+/** In-memory cache for threshold values to reduce D1 reads */
 let _cachedEffective = null;
 let _cachedWindow = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function readWindow(kv) {
-  // Use in-memory cache if available
-  if (_cachedWindow !== null) return _cachedWindow;
-
-  try {
-    const raw = await kv.get(WINDOW_KEY);
-    _cachedWindow = raw ? JSON.parse(raw) : [];
-    return _cachedWindow;
-  } catch {
-    return [];
-  }
+function todayUTC() {
+    return new Date().toISOString().split("T")[0];
 }
 
-async function saveWindow(kv, window) {
-  // Update in-memory cache immediately
-  _cachedWindow = window;
+async function readWindow(db) {
+    if (_cachedWindow !== null) return _cachedWindow;
 
-  try {
-    await kvPutRetry(kv, WINDOW_KEY, JSON.stringify(window), {
-      expirationTtl: THRESHOLD_TTL,
-    });
-  } catch (err) {
-    logger.warn(`[Threshold] Failed to save score window to KV: ${err.message}`);
-  }
+    try {
+        const row = await db
+            .prepare(`SELECT value FROM threshold_state WHERE key = ?`)
+            .bind(WINDOW_KEY)
+            .first();
+        _cachedWindow = row ? JSON.parse(row.value) : [];
+        return _cachedWindow;
+    } catch {
+        return [];
+    }
 }
 
-async function readEffective(kv, configDefault) {
-  // Use in-memory cache if available
-  if (_cachedEffective !== null) return _cachedEffective;
+async function saveWindow(db, window) {
+    _cachedWindow = window;
 
-  try {
-    const raw = await kv.get(EFFECTIVE_KEY);
-    _cachedEffective = raw ? parseInt(raw, 10) : configDefault;
-    return _cachedEffective;
-  } catch {
-    return configDefault;
-  }
+    try {
+        await db
+            .prepare(
+                `INSERT INTO threshold_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+            )
+            .bind(WINDOW_KEY, JSON.stringify(window))
+            .run();
+    } catch (err) {
+        logger.warn(`[Threshold] Failed to save score window to D1: ${err.message}`);
+    }
 }
 
-async function saveEffective(kv, value) {
-  // Only write to KV if value actually changed significantly
-  if (_cachedEffective !== null && Math.abs(_cachedEffective - value) < 2) {
-    return; // Skip KV write if change is minor
-  }
+async function readEffective(db, configDefault) {
+    if (_cachedEffective !== null) return _cachedEffective;
 
-  // Update in-memory cache
-  _cachedEffective = value;
+    try {
+        const row = await db
+            .prepare(`SELECT value FROM threshold_state WHERE key = ?`)
+            .bind(EFFECTIVE_KEY)
+            .first();
+        _cachedEffective = row ? parseInt(row.value, 10) : configDefault;
+        return _cachedEffective;
+    } catch {
+        return configDefault;
+    }
+}
 
-  try {
-    await kvPutRetry(kv, EFFECTIVE_KEY, String(value), {
-      expirationTtl: THRESHOLD_TTL,
-    });
-  } catch (err) {
-    logger.warn(`[Threshold] Failed to save effective threshold to KV: ${err.message}`);
-  }
+async function saveEffective(db, value) {
+    // Only write to D1 if value actually changed significantly
+    if (_cachedEffective !== null && Math.abs(_cachedEffective - value) < 2) {
+        return;
+    }
+
+    _cachedEffective = value;
+
+    try {
+        await db
+            .prepare(
+                `INSERT INTO threshold_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+            )
+            .bind(EFFECTIVE_KEY, String(value))
+            .run();
+    } catch (err) {
+        logger.warn(
+            `[Threshold] Failed to save effective threshold to D1: ${err.message}`,
+        );
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * Push a newly evaluated job score into the rolling window.
- * @param {KVNamespace} kv
+ * CHANGED: Now takes D1 db instead of KV.
+ *
+ * @param {D1Database} db
  * @param {number} score
  */
-export async function recordJobScore(kv, score) {
-  const window = await readWindow(kv);
-  window.push(score);
-  // Keep only the last WINDOW_SIZE entries
-  if (window.length > WINDOW_SIZE)
-    window.splice(0, window.length - WINDOW_SIZE);
-  await saveWindow(kv, window);
+export async function recordJobScore(db, score) {
+    const window = await readWindow(db);
+    window.push(score);
+    if (window.length > WINDOW_SIZE)
+        window.splice(0, window.length - WINDOW_SIZE);
+    await saveWindow(db, window);
 }
 
 /**
  * Compute statistics from the rolling window.
- * @param {KVNamespace} kv
+ * CHANGED: Now takes D1 db instead of KV.
+ *
+ * @param {D1Database} db
  * @returns {Promise<{ mean: number, p75: number, p90: number, sampleSize: number }>}
  */
-export async function computeWindowStats(kv) {
-  const window = await readWindow(kv);
-  if (!window.length)
-    return { mean: null, p75: null, p90: null, sampleSize: 0 };
+export async function computeWindowStats(db) {
+    const window = await readWindow(db);
+    if (!window.length)
+        return { mean: null, p75: null, p90: null, sampleSize: 0 };
 
-  const sorted = [...window].sort((a, b) => a - b);
-  const mean = Math.round(window.reduce((s, v) => s + v, 0) / window.length);
-  const p75 = sorted[Math.floor(sorted.length * 0.75)];
-  const p90 = sorted[Math.floor(sorted.length * 0.9)];
+    const sorted = [...window].sort((a, b) => a - b);
+    const mean = Math.round(window.reduce((s, v) => s + v, 0) / window.length);
+    const p75 = sorted[Math.floor(sorted.length * 0.75)];
+    const p90 = sorted[Math.floor(sorted.length * 0.9)];
 
-  return { mean, p75, p90, sampleSize: window.length };
+    return { mean, p75, p90, sampleSize: window.length };
 }
 
 /**
- * Get the current effective threshold, applying auto-adjustment based on
- * match rate from the last run.
+ * Get the current effective threshold, applying auto-adjustment.
+ * CHANGED: Now takes D1 db instead of KV.
  *
- * @param {KVNamespace} kv
+ * @param {D1Database} db
  * @param {number} configThreshold - Base threshold from config.
- * @param {{ matchedLastRun?: number }} context - Pass matched count from last run.
+ * @param {{ matchedLastRun?: number }} context
  * @returns {Promise<{ effective: number, base: number, adjusted: boolean }>}
  */
-export async function getEffectiveThreshold(kv, configThreshold, context = {}) {
-  const effective = await readEffective(kv, configThreshold);
-  const { matchedLastRun } = context;
+export async function getEffectiveThreshold(db, configThreshold, context = {}) {
+    const effective = await readEffective(db, configThreshold);
+    const { matchedLastRun } = context;
 
-  if (matchedLastRun === undefined || matchedLastRun === null) {
-    // First run or no context — return current effective unchanged
-    return { effective, base: configThreshold, adjusted: false };
-  }
+    if (matchedLastRun === undefined || matchedLastRun === null) {
+        return { effective, base: configThreshold, adjusted: false };
+    }
 
-  let next = effective;
-  let adjusted = false;
+    let next = effective;
+    let adjusted = false;
 
-  if (matchedLastRun > TARGET_MAX_MATCHES) {
-    // Too many alerts → raise bar
-    next = Math.min(MAX_THRESHOLD, effective + ADJUST_STEP);
-    adjusted = true;
-    logger.info(
-      `[Threshold] Too many matches (${matchedLastRun}) → raising to ${next}`,
-    );
-  } else if (matchedLastRun < TARGET_MIN_MATCHES) {
-    // Too few alerts → lower bar
-    next = Math.max(MIN_THRESHOLD, effective - ADJUST_STEP);
-    adjusted = true;
-    logger.info(
-      `[Threshold] Too few matches (${matchedLastRun}) → lowering to ${next}`,
-    );
-  }
+    if (matchedLastRun > TARGET_MAX_MATCHES) {
+        next = Math.min(MAX_THRESHOLD, effective + ADJUST_STEP);
+        adjusted = true;
+        logger.info(
+            `[Threshold] Too many matches (${matchedLastRun}) → raising to ${next}`,
+        );
+    } else if (matchedLastRun < TARGET_MIN_MATCHES) {
+        next = Math.max(MIN_THRESHOLD, effective - ADJUST_STEP);
+        adjusted = true;
+        logger.info(
+            `[Threshold] Too few matches (${matchedLastRun}) → lowering to ${next}`,
+        );
+    }
 
-  if (adjusted) await saveEffective(kv, next);
+    if (adjusted) await saveEffective(db, next);
 
-  return { effective: next, base: configThreshold, adjusted };
+    return { effective: next, base: configThreshold, adjusted };
 }
 
-import { trackScoreDistribution } from "./dailyReport.js";
-
 /**
- * Batch record multiple job scores with a single KV write.
- * Reduces KV writes from N (per job) to 1 (per batch).
+ * Batch record multiple job scores with a single D1 write.
+ * Also updates the score histogram in D1 (replaces KV histogram).
  *
- * @param {KVNamespace} kv
+ * CHANGED: Now takes D1 db instead of KV.
+ * Eliminates 2 KV reads + 2 KV writes per evaluateJobs batch.
+ *
+ * @param {D1Database} db
  * @param {number[]} scores - Array of scores to record
  */
-export async function recordJobScoresBatch(kv, scores) {
-  if (!scores || scores.length === 0) return;
+export async function recordJobScoresBatch(db, scores) {
+    if (!scores || scores.length === 0) return;
 
-  // Add all scores to the rolling window
-  const window = await readWindow(kv);
-  window.push(...scores);
+    // Add all scores to the rolling window
+    const window = await readWindow(db);
+    window.push(...scores);
 
-  // Keep only the last WINDOW_SIZE entries
-  if (window.length > WINDOW_SIZE)
-    window.splice(0, window.length - WINDOW_SIZE);
+    if (window.length > WINDOW_SIZE)
+        window.splice(0, window.length - WINDOW_SIZE);
 
-  // Single KV write for all scores
-  await saveWindow(kv, window);
+    // Save window to D1
+    await saveWindow(db, window);
 
-  // Track score distribution histogram — batch update with a single KV read-modify-write
-  // instead of N individual calls (fixes duplicate trackScoreDistribution issue)
-  try {
-    const raw = await kv.get("metrics:score_histogram");
-    const hist = raw ? JSON.parse(raw) : {};
-    for (const s of scores) {
-      const bucket = Math.floor(Math.max(0, Math.min(99, s)) / 10) * 10;
-      hist[bucket] = (hist[bucket] || 0) + 1;
+    // Update score histogram in D1 (replaces KV read-modify-write)
+    try {
+        const date = todayUTC();
+        const bucketCounts = {};
+        for (const s of scores) {
+            const bucket = Math.floor(Math.max(0, Math.min(99, s)) / 10) * 10;
+            bucketCounts[bucket] = (bucketCounts[bucket] || 0) + 1;
+        }
+
+        const stmts = Object.entries(bucketCounts).map(([bucket, count]) =>
+            db
+                .prepare(
+                    `INSERT INTO score_histogram (date, bucket, count) VALUES (?, ?, ?)
+           ON CONFLICT(date, bucket) DO UPDATE SET count = count + ?`,
+                )
+                .bind(date, parseInt(bucket), count, count),
+        );
+
+        if (stmts.length > 0) {
+            await db.batch(stmts);
+        }
+    } catch (err) {
+        // Non-critical — histogram is for observability only
+        logger.warn(`[Threshold] Score histogram D1 write failed: ${err.message}`);
     }
-    await kvPutRetry(kv, "metrics:score_histogram", JSON.stringify(hist), {
-      expirationTtl: 86400 * 2,
-    });
-  } catch (err) {
-    // Non-critical — histogram is for observability only
-  }
+}
+
+/**
+ * Read score histogram from D1 for the daily report.
+ * Replaces KV get("metrics:score_histogram").
+ *
+ * @param {D1Database} db
+ * @param {string} [date] - Date to query (defaults to today)
+ * @returns {Promise<object>} Histogram object { bucket: count }
+ */
+export async function getScoreHistogram(db, date) {
+    const targetDate = date || todayUTC();
+    try {
+        const result = await db
+            .prepare(`SELECT bucket, count FROM score_histogram WHERE date = ?`)
+            .bind(targetDate)
+            .all();
+
+        const hist = {};
+        if (result.success) {
+            for (const row of result.results) {
+                hist[row.bucket] = row.count;
+            }
+        }
+        return hist;
+    } catch {
+        return {};
+    }
 }

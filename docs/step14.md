@@ -2,13 +2,13 @@
 
 ## System Overview
 
-Job Hunter Bot v5.2 is a **fully event-driven, serverless job intelligence pipeline** built on Cloudflare's edge computing platform. It automatically discovers, fetches, scores, deduplicates, and alerts on software engineering job postings from 47+ sources — all with zero servers, zero ops, and near-zero cost.
+Job Hunter Bot v5.3 is a **fully event-driven, serverless job intelligence pipeline** built on Cloudflare's edge computing platform. It automatically discovers, fetches, scores, deduplicates, and alerts on software engineering job postings from 47+ sources — all with zero servers, zero ops, and near-zero cost.
 
 ```
 ZERO-COST ARCHITECTURE:
   No servers, no VMs, no containers
   Runs on Cloudflare's global edge (200+ PoPs)
-  Cost: ~$0 (Workers free tier) + ~$5/month (KV, if needed)
+  Cost: $0 (Workers free tier) — all resources within free limits (v5.3)
 ```
 
 ---
@@ -125,13 +125,13 @@ ZERO-COST ARCHITECTURE:
   └──────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │  INTELLIGENCE LAYER (cross-cutting)                                      │
+  │  INTELLIGENCE LAYER (cross-cutting, updated v5.3)                        │
   │                                                                          │
-  │  feedHealth.js     — circuit breaker (KV), dynamic cooldown w/ jitter   │
-  │  threshold.js      — dynamic alert threshold (KV), auto-adjust ±2/cycle │
+  │  feedHealth.js     — D1 health records + KV circuit breaker (v5.3)       │
+  │  threshold.js      — D1 dynamic threshold + score histogram (v5.3)      │
   │  sourceIntelligence.js — priority scoring, crawl tier assignment         │
   │  growthEngine.js   — market skill spikes + company hiring surge signals  │
-  │  dailyReport.js    — D1+KV aggregation → formatted intelligence report   │
+  │  dailyReport.js    — D1 aggregation + metrics buffering (v5.3)          │
   │  calibration.js    — threshold re-training (every 24 cycles)            │
   │  enrichment.js     — job metadata enrichment                            │
   │  feedback.js       — user preference weights → score boosts             │
@@ -210,10 +210,10 @@ T+0:00  Midnight UTC: sendDailyReport() fires
 |---|---|---|
 | **Reliability** | Circuit breakers + 3-tier fallback + 5× alert retry | ✅ Excellent |
 | **Observability** | Daily reports, score histogram, feed health, config warnings | ✅ Good |
-| **Scalability** | Priority-ranked source selection + AI skip optimization | 🟡 Good (KV limit concern) |
+| **Scalability** | Priority-ranked + AI skip + KV→D1 migration (v5.3)  | ✅ Excellent |  
 | **Deduplication** | 4-layer (memory + D1 + SimHash + embedding) | ✅ Excellent |
 | **Latency** | Jobs discovered within 15 minutes of posting | ✅ Excellent |
-| **Cost** | ~2% of Worker invocation free tier; KV may need paid plan | 🟡 Watch |
+| **Cost** | All resources within free tier (v5.3: KV ~192/day) | ✅ Excellent |
 | **Fault Tolerance** | Global try-catch, msg.retry() safety nets throughout | ✅ Excellent |
 | **Intelligence** | Self-expanding sources, dynamic threshold, ML scoring | ✅ Advanced |
 
@@ -221,8 +221,10 @@ T+0:00  Midnight UTC: sendDailyReport() fires
 
 ## Three Top Improvements (Priority Order)
 
-1. **Add two staggered cron expressions** (`5,20,35,50` and `10,25,40,55`) → enables true batch distribution, reduces per-invocation CPU by 66%
+> **All three completed in v5.3.** See [step15.md](./step15.md) for full details.
 
-2. **Migrate circuit breaker records from KV → D1** → reduces KV writes from ~5K to ~150/day, enabling free tier operation
+1. **✅ Added two staggered cron expressions** (`5,20,35,50` and `10,25,40,55`) → true batch distribution, per-invocation CPU reduced by 66%
 
-3. **Reduce `daily_metrics` to one write per stage** → accumulate in local buffer, write once at end of each Worker function → saves ~200 D1 writes/day
+2. **✅ Migrated health/threshold/histogram from KV → D1** → KV writes reduced from ~4,876 to ~192/day, fully within free tier
+
+3. **✅ Added metrics write buffering** → `bufferMetrics()` accumulates in-memory, single `flushMetricsBuffer(D1)` per handler → ~66% fewer D1 writes

@@ -54,6 +54,67 @@ const KNOWN_METRIC_COLUMNS = new Set([
 
 // ── Metric Accumulator ────────────────────────────────────────────────────────
 
+// ── Fix 6: In-memory metrics buffer ─────────────────────────────────────────
+// Buffer metrics in memory and flush ONCE per handler invocation.
+// Reduces multiple D1 batch calls per cycle to a single flush.
+let _metricsBuffer = {};
+let _skillCountsBuffer = {};
+
+/**
+ * Buffer metrics in memory instead of writing immediately to D1.
+ * Call flushMetricsBuffer() at the end of each handler invocation.
+ *
+ * Fix 6: Reduces D1 writes by ~66% (from 3+ writes to 1 per invocation).
+ *
+ * @param {object} deltas - { sources_scanned: 5, raw_jobs_found: 42, ... }
+ */
+export function bufferMetrics(deltas) {
+  for (const [key, val] of Object.entries(deltas)) {
+    if (key === "skill_counts") {
+      if (val && typeof val === "object") {
+        for (const [skill, count] of Object.entries(val)) {
+          _skillCountsBuffer[skill] =
+            (_skillCountsBuffer[skill] || 0) + count;
+        }
+      }
+      continue;
+    }
+    if (key === "score_max") {
+      _metricsBuffer.score_max = Math.max(
+        _metricsBuffer.score_max || 0,
+        val,
+      );
+    } else {
+      _metricsBuffer[key] = (_metricsBuffer[key] || 0) + val;
+    }
+  }
+}
+
+/**
+ * Flush all buffered metrics to D1 in a single batch call.
+ * Should be called once at the end of each handler invocation.
+ *
+ * @param {D1Database} db
+ * @returns {Promise<void>}
+ */
+export async function flushMetricsBuffer(db) {
+  const hasMetrics = Object.keys(_metricsBuffer).length > 0;
+  const hasSkills = Object.keys(_skillCountsBuffer).length > 0;
+
+  if (!hasMetrics && !hasSkills) return;
+
+  const deltas = { ..._metricsBuffer };
+  if (hasSkills) {
+    deltas.skill_counts = { ..._skillCountsBuffer };
+  }
+
+  // Reset buffers BEFORE the async write to prevent double-flush
+  _metricsBuffer = {};
+  _skillCountsBuffer = {};
+
+  await incrementDailyMetrics(db, deltas);
+}
+
 /**
  * Increment daily metric counters. Creates today's row if it doesn't exist.
  * Keys are validated against the known column set to prevent silent SQL failures.
@@ -118,27 +179,18 @@ export async function incrementDailyMetrics(db, deltas) {
 // ── Score Distribution Tracker ─────────────────────────────────────────────────
 
 /**
- * Track a score in a histogram stored in KV.
- * Increments the bucket (0, 10, 20, ... 90) for the given score.
- * Used by the report to show WHY jobs aren't alerting.
+ * @deprecated Score histogram is now stored in D1 via threshold.js recordJobScoresBatch().
+ * Kept for backward compatibility — now a no-op.
  *
  * @param {number} score
  * @param {KVNamespace} kv
  * @returns {Promise<void>}
  */
 export async function trackScoreDistribution(score, kv) {
-  if (!kv) return;
-  try {
-    const bucket = Math.floor(Math.max(0, Math.min(99, score)) / 10) * 10; // 0,10,20,...90
-    const raw = await kv.get("metrics:score_histogram");
-    const hist = raw ? JSON.parse(raw) : {};
-    hist[bucket] = (hist[bucket] || 0) + 1;
-    await kv.put("metrics:score_histogram", JSON.stringify(hist), {
-      expirationTtl: 86400 * 2, // 48h TTL
-    });
-  } catch (err) {
-    logger.warn(`[DailyMetrics] Score histogram write failed: ${err.message}`);
-  }
+  // Fix 1: Score histogram moved to D1 (score_histogram table).
+  // This function is now a no-op. Histogram is written by
+  // threshold.js recordJobScoresBatch() directly to D1.
+  return;
 }
 
 async function mergeSkillCounts(db, date, newCounts) {
@@ -281,19 +333,25 @@ export async function getDailyReportData(db, options = {}) {
       logger.warn(`[DailyReport] sent_alerts not available: ${err.message}`);
     }
 
-    // ── KV: score histogram + discovery stats ──────────────────────────────
+    // ── Score histogram from D1 + discovery stats from KV ─────────────────
     let scoreHistogram = {};
     let discoveryStats = null;
+
+    // Fix 1: Read score histogram from D1 instead of KV
+    try {
+      const { getScoreHistogram } = await import("./threshold.js");
+      scoreHistogram = await getScoreHistogram(db, date);
+    } catch (err) {
+      logger.warn(`[DailyReport] D1 histogram read failed: ${err.message}`);
+    }
+
+    // Discovery stats still in KV (low-write, acceptable)
     if (options.kv) {
       try {
-        const [histRaw, discoveryRaw] = await Promise.all([
-          options.kv.get("metrics:score_histogram"),
-          options.kv.get("discovery:last_run_stats"),
-        ]);
-        if (histRaw) scoreHistogram = JSON.parse(histRaw);
+        const discoveryRaw = await options.kv.get("discovery:last_run_stats");
         if (discoveryRaw) discoveryStats = JSON.parse(discoveryRaw);
       } catch (err) {
-        logger.warn(`[DailyReport] KV read failed: ${err.message}`);
+        logger.warn(`[DailyReport] KV discovery stats read failed: ${err.message}`);
       }
     }
 
@@ -519,12 +577,12 @@ export function formatDailyReport(data) {
   const avgPriority =
     allTierCounts > 0
       ? (
-          (tierHigh * (tiers.high?.avgScore || 0) +
-            tierMed * (tiers.medium?.avgScore || 0) +
-            tierLow * (tiers.low?.avgScore || 0) +
-            tierDormant * (tiers.dormant?.avgScore || 0)) /
-          allTierCounts
-        ).toFixed(1)
+        (tierHigh * (tiers.high?.avgScore || 0) +
+          tierMed * (tiers.medium?.avgScore || 0) +
+          tierLow * (tiers.low?.avgScore || 0) +
+          tierDormant * (tiers.dormant?.avgScore || 0)) /
+        allTierCounts
+      ).toFixed(1)
       : "0";
 
   // Resource safety
@@ -550,40 +608,40 @@ export function formatDailyReport(data) {
   const scoreDistLines =
     totalScored > 0
       ? [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-          .map((b) => {
-            const count = scoreHistogram[b] || 0;
-            if (count === 0) return null;
-            const pct = Math.round((count / totalScored) * 100);
-            const bar = "█".repeat(Math.max(1, Math.round(pct / 5)));
-            const label = `${b}-${b + 9}`.padEnd(6);
-            const flag = b >= 45 ? "" : " ← below threshold";
-            return `  ${label} ${bar.padEnd(12)} ${count} (${pct}%)${flag}`;
-          })
-          .filter(Boolean)
-          .join("\n")
+        .map((b) => {
+          const count = scoreHistogram[b] || 0;
+          if (count === 0) return null;
+          const pct = Math.round((count / totalScored) * 100);
+          const bar = "█".repeat(Math.max(1, Math.round(pct / 5)));
+          const label = `${b}-${b + 9}`.padEnd(6);
+          const flag = b >= 45 ? "" : " ← below threshold";
+          return `  ${label} ${bar.padEnd(12)} ${count} (${pct}%)${flag}`;
+        })
+        .filter(Boolean)
+        .join("\n")
       : "  No score data yet — check scoring pipeline";
 
   // ── Failing Sources ──────────────────────────────────────────────────────
   const failingLines =
     topFailingSources.length > 0
       ? topFailingSources
-          .map((s) => {
-            const name = (s.name || s.url || "").substring(0, 30).padEnd(30);
-            const err = (s.last_error || "unknown error").substring(0, 50);
-            return `  ❌ ${name} | ${s.consecutive_failures || 0} consec fails | ${err}`;
-          })
-          .join("\n")
+        .map((s) => {
+          const name = (s.name || s.url || "").substring(0, 30).padEnd(30);
+          const err = (s.last_error || "unknown error").substring(0, 50);
+          return `  ❌ ${name} | ${s.consecutive_failures || 0} consec fails | ${err}`;
+        })
+        .join("\n")
       : "  ✅ No sources in critical failure state";
 
   // ── Discovery Engine ─────────────────────────────────────────────────────
   const discoveryLine = discoveryStats
     ? [
-        `  Last run: ${discoveryStats.timestamp || "unknown"}`,
-        `  Attempted: ${discoveryStats.attempted || 0} | Found: ${discoveryStats.discovered || 0} | Failed: ${discoveryStats.failed || 0}`,
-        discoveryStats.errors?.length
-          ? `  ⚠️  Last error: ${discoveryStats.errors[0].substring(0, 80)}`
-          : "  ✅ No discovery errors",
-      ].join("\n")
+      `  Last run: ${discoveryStats.timestamp || "unknown"}`,
+      `  Attempted: ${discoveryStats.attempted || 0} | Found: ${discoveryStats.discovered || 0} | Failed: ${discoveryStats.failed || 0}`,
+      discoveryStats.errors?.length
+        ? `  ⚠️  Last error: ${discoveryStats.errors[0].substring(0, 80)}`
+        : "  ✅ No discovery errors",
+    ].join("\n")
     : "  ⚠️  No discovery run data — discovery engine may not be triggering";
 
   // ── Config Validation ────────────────────────────────────────────────────

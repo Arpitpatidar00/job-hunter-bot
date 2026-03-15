@@ -2,8 +2,8 @@
 -- Addresses: Full table scans on jobs.company, daily_metrics.date
 -- Adds: job_chunks and sent_alerts cleanup retention support
 
--- Index for detectHiringSurge: GROUP BY company WHERE created_at >= ...
-CREATE INDEX IF NOT EXISTS idx_jobs_company_created ON jobs(company, created_at);
+-- Index for detectHiringSurge: GROUP BY company WHERE fetched_at >= ...
+CREATE INDEX IF NOT EXISTS idx_jobs_company_created ON jobs(company, fetched_at);
 
 -- Index for daily_metrics date-range queries (detectSkillSpikes)
 CREATE INDEX IF NOT EXISTS idx_daily_metrics_date ON daily_metrics(date);

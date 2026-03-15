@@ -2,14 +2,13 @@
 -- Run with: wrangler d1 execute JOB_HUNTER_DB --file=migrations/008_fix_issues.sql
 --
 -- NOTE: D1 does not support "IF NOT EXISTS" on ALTER TABLE.
--- If a column already exists, skip that statement and continue.
+-- Columns already present from prior migrations are commented out.
 
--- source_registry: track consecutive failures and last error
-ALTER TABLE source_registry ADD COLUMN last_new_job_at TEXT;
-ALTER TABLE source_registry ADD COLUMN consecutive_failures INTEGER DEFAULT 0;
+-- source_registry: these columns already exist from 0005 + 0006:
+--   last_new_job_at (0006), consecutive_failures (0005),
+--   failure_count (0005), discovery_origin (0005)
+-- Only last_error is new:
 ALTER TABLE source_registry ADD COLUMN last_error TEXT DEFAULT '';
-ALTER TABLE source_registry ADD COLUMN failure_count INTEGER DEFAULT 0;
-ALTER TABLE source_registry ADD COLUMN discovery_origin TEXT DEFAULT 'config';
 
 -- jobs: track score and score breakdown for distribution reporting
 ALTER TABLE jobs ADD COLUMN score REAL DEFAULT 0;

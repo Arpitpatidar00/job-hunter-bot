@@ -55,6 +55,73 @@ const FREE_TIER_DAILY_KV_WRITES = 1000;
 /** Max KV writes this module should consume per expansion run. */
 const MAX_KV_WRITES_PER_RUN = 3;
 
+/** Cache TTL for search query results — 24 hours. */
+const SEARCH_CACHE_TTL = 24 * 60 * 60;
+
+// ── Search Query Cache (Fix 5) ───────────────────────────────────────────────
+
+/**
+ * Hash a query string to a short cache key.
+ * @param {string} query
+ * @returns {string}
+ */
+function hashQuery(query) {
+  let h = 0x811c9dc5;
+  const normalized = query.toLowerCase().trim();
+  for (let i = 0; i < normalized.length; i++) {
+    h ^= normalized.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/**
+ * Search with KV-backed 24h cache to avoid repeated identical API calls.
+ * Fix 5: Prevents unnecessary search engine queries for the same terms.
+ *
+ * @param {string} query
+ * @param {KVNamespace} [kv]
+ * @returns {Promise<string[]>} URLs from search results.
+ */
+async function searchWithCache(query, kv) {
+  const cacheKey = `search:cache:${hashQuery(query)}`;
+
+  // Try cache first
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) {
+        const urls = JSON.parse(cached);
+        logger.info(
+          `[SearchExpander] Cache HIT for "${query}" (${urls.length} URLs)`,
+        );
+        return urls;
+      }
+    } catch {
+      // Cache miss or parse error — proceed with live search
+    }
+  }
+
+  // Cache miss — perform live search
+  const urls = await searchMultiBackend(query);
+
+  // Store result in cache (only if we got results)
+  if (kv && urls.length > 0) {
+    try {
+      await kvPutWithRetry(kv, cacheKey, JSON.stringify(urls), {
+        expirationTtl: SEARCH_CACHE_TTL,
+      });
+    } catch (err) {
+      // Non-critical — cache write failure doesn't affect functionality
+      logger.warn(
+        `[SearchExpander] Cache write failed for "${query}": ${err.message}`,
+      );
+    }
+  }
+
+  return urls;
+}
+
 // ── KV Write with Exponential Backoff ────────────────────────────────────────
 
 /**
@@ -138,7 +205,8 @@ export async function runSearchExpansion(
   for (const query of selected) {
     stats.attempted++;
     try {
-      const urls = await searchMultiBackend(query);
+      // Fix 5: Use cached search results to avoid repeated API calls
+      const urls = await searchWithCache(query, kv);
 
       if (!urls.length) {
         logger.info(`[SearchExpander] No results for query: "${query}"`);
@@ -230,12 +298,12 @@ export async function runSearchExpansion(
   // ── End-of-run summary log ────────────────────────────────────────────────
   logger.info(
     `[SearchExpander] Expansion complete: ` +
-      `queries=${stats.attempted}, ` +
-      `ats=${totalNewAts}, ` +
-      `domains=${totalNewDomains}, ` +
-      `fallbacks=${stats.fallbackRegistered}, ` +
-      `failed=${stats.failed}, ` +
-      `kvWrites=${stats.kvWritesUsed}`,
+    `queries=${stats.attempted}, ` +
+    `ats=${totalNewAts}, ` +
+    `domains=${totalNewDomains}, ` +
+    `fallbacks=${stats.fallbackRegistered}, ` +
+    `failed=${stats.failed}, ` +
+    `kvWrites=${stats.kvWritesUsed}`,
   );
 
   return { newAtsSources: totalNewAts, newDomains: totalNewDomains };

@@ -610,19 +610,31 @@ export function loadConfig() {
       /** Base discovery query — configurable instead of hardcoded */
       baseQuery: 'MERN remote India "careers"',
       queries: [
-        // --- ATS board discovery (directly targets Greenhouse/Lever/Ashby URLs) ---
-        // These surface actual ATS board URLs that sourceDiscovery.js can pattern-match
+        // --- ATS board discovery: Greenhouse ---
         "site:boards.greenhouse.io javascript developer remote",
         "site:boards.greenhouse.io react engineer remote hiring",
         "site:boards.greenhouse.io typescript fullstack remote",
+        "site:boards.greenhouse.io backend engineer node",
+        "site:boards.greenhouse.io software engineer 2025",
+        // --- ATS board discovery: Lever ---
         "site:jobs.lever.co javascript engineer remote",
         "site:jobs.lever.co node.js backend remote",
+        "site:jobs.lever.co fullstack typescript remote",
+        "site:jobs.lever.co software engineer startup",
+        // --- ATS board discovery: Ashby ---
         "site:jobs.ashbyhq.com react developer remote",
         "site:jobs.ashbyhq.com fullstack javascript",
+        "site:jobs.ashbyhq.com backend engineer",
+        // --- ATS board discovery: SmartRecruiters ---
+        "site:careers.smartrecruiters.com javascript developer remote",
+        "site:careers.smartrecruiters.com software engineer",
+        // --- ATS board discovery: Workable ---
         "site:apply.workable.com remote javascript developer",
-
+        "site:apply.workable.com fullstack engineer",
+        // --- ATS board discovery: Recruitee + Teamtailor ---
+        "site:recruitee.com software engineer remote",
+        "site:teamtailor.com developer remote javascript",
         // --- Company career page discovery ---
-        // Surfaces company-owned career pages for careerDetector.js
         "remote javascript developer careers site:greenhouse.io OR site:lever.co",
         '"we are hiring" remote react developer site:.co OR site:.io',
         'remote next.js developer "apply now" startup',
@@ -630,17 +642,30 @@ export function loadConfig() {
         "Y Combinator company hiring remote node.js engineer",
         "remote-first company javascript typescript engineer openings",
         '"join our team" remote react node developer',
+        // --- Niche / vertical discovery ---
+        'remote devops engineer "careers" site:.io OR site:.com',
+        'AI startup hiring remote engineer "open positions"',
+        'fintech company remote developer careers 2025',
+        'saas startup hiring fullstack engineer remote',
+        'developer tools company careers remote engineer',
+        '"open roles" remote backend engineer node typescript',
+        'climate tech startup hiring remote engineer',
+        'healthcare startup remote developer "apply"',
+        // --- Dataset-style discovery (company lists) ---
+        'YC W25 companies hiring engineers',
+        'a16z portfolio companies hiring remote',
+        '"series B" startup remote javascript engineer',
       ],
-      maxSearchesPerCycle: 5,
-      maxDomainsPerSearch: 15,
+      maxSearchesPerCycle: 8,
+      maxDomainsPerSearch: 20,
     },
 
     crawlIntelligence: {
       enabled: true,
       /** Run priority recalculation every N cron cycles */
       recalcIntervalCycles: 4,
-      /** Run search expansion every N cron cycles — every ~2 hours */
-      searchIntervalCycles: 8,
+      /** Run search expansion every N cron cycles — every ~1 hour */
+      searchIntervalCycles: 4,
       /** Run career page probing every N cron cycles — every ~1 hour */
       careerProbeIntervalCycles: 4,
       /** Max domains to probe per career detection cycle (capped to stay within subrequest limits) */

@@ -59,6 +59,10 @@
 			{
 				"queue": "alert-queue",
 				"binding": "ALERT_QUEUE"
+			},
+			{
+				"queue": "discovery-queue",
+				"binding": "DISCOVERY_QUEUE"
 			}
 		],
 		// Queue Consumers (Worker receives messages FROM these)
@@ -81,6 +85,12 @@
 				"max_batch_size": 10,
 				"max_batch_timeout": 2,
 				"max_retries": 5
+			},
+			{
+				"queue": "discovery-queue",
+				"max_batch_size": 5,
+				"max_batch_timeout": 5,
+				"max_retries": 2
 			}
 		]
 	},

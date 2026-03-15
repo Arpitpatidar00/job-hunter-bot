@@ -186,7 +186,17 @@ const ATS_PATTERNS = [
             const parts = pathname.split('/').filter(Boolean);
             return parts[0] || null;
         },
-        buildUrl: (slug) => `https://api.jobvite.com/api/v2/job?sc=${slug}`,
+        buildUrl: (slug) => `https://jobs.jobvite.com/CompanyJobs/json/${slug}`,
+    },
+    {
+        // Workday: {company}.wd{1-5}.myworkdayjobs.com
+        hostname: /\.wd\d+\.myworkdayjobs\.com$/i,
+        type: 'workday',
+        extractSlug: (_pathname, hostname) => {
+            const match = hostname.match(/^([^.]+)\.wd\d+\.myworkdayjobs\.com$/i);
+            return match ? match[1] : null;
+        },
+        buildUrl: (slug) => `https://${slug}.wd5.myworkdayjobs.com/wday/cxs/${slug}/External_Career_Site/jobs`,
     },
 ];
 
@@ -260,6 +270,7 @@ export function detectAtsSources(jobUrls, knownSourceUrls = new Set()) {
                 name: capitalizeSlug(slug),
                 enabled: true,
                 discovery_origin: 'auto-detected',
+                ats_platform: pattern.type,
             });
 
             logger.info(`[Discovery] Detected new ${pattern.type} source: ${slug} → ${sourceUrl}`);
@@ -318,6 +329,7 @@ export function detectAtsSourcesWithDomains(jobUrls, knownSourceUrls = new Set()
                 name: capitalizeSlug(slug),
                 enabled: true,
                 discovery_origin: 'auto-detected',
+                ats_platform: pattern.type,
             });
             logger.info(`[Discovery] Detected new ${pattern.type} source: ${slug} → ${sourceUrl}`);
         }

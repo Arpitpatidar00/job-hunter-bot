@@ -13,7 +13,8 @@
  */
 
 import { fetchWithTimeout, rateLimitDomain } from "../connectors/base.js";
-import { registerDiscoveredSource } from "../db/index.js";
+import { detectAtsSources } from "./sourceDiscovery.js";
+import { registerDiscoveredSource, batchRegisterDiscoveredSources } from "../db/index.js";
 import logger from "../core/logger.js";
 
 /** Common career page path suffixes to probe. */
@@ -67,6 +68,18 @@ export async function probeDomainsForCareers(db, domains, maxProbes = 15) {
 
         await registerDiscoveredSource(db, source);
         registered.push(source);
+
+        // Redirect mining: auto-register any ATS sources found in the page
+        if (result.atsRedirects && result.atsRedirects.length > 0) {
+          const atsSources = detectAtsSources(result.atsRedirects);
+          if (atsSources.length > 0) {
+            await batchRegisterDiscoveredSources(db, atsSources);
+            for (const ats of atsSources) registered.push(ats);
+            logger.info(
+              `[CareerDetector] Redirect mining: ${domain} → ${atsSources.length} ATS source(s) discovered`,
+            );
+          }
+        }
 
         // Update domain registry
         await updateDomainStatus(db, domain, {
@@ -135,12 +148,16 @@ async function probeSingleDomain(domain) {
       // Check for job-like links
       const jobLinkCount = countJobLinks(html);
 
+      // Redirect mining: extract ATS URLs from apply/job links
+      const atsRedirects = extractAtsRedirects(html);
+
       if (hasJsonLd || jobLinkCount >= 2) {
         return {
           careerUrl: res.url || url, // Follow redirects
           hasJsonLd,
           hasJobLinks: jobLinkCount > 0,
           jobCount: hasJsonLd ? countJsonLdPostings(html) : jobLinkCount,
+          atsRedirects,
         };
       }
     } catch {
@@ -150,6 +167,36 @@ async function probeSingleDomain(domain) {
   }
 
   return null; // No career page found
+}
+
+/**
+ * Extract ATS platform URLs from anchor hrefs in career page HTML.
+ * This implements "redirect mining" — discovering which ATS a company uses
+ * by inspecting where their apply buttons link to.
+ *
+ * @param {string} html
+ * @returns {string[]} ATS URLs found in the page
+ */
+function extractAtsRedirects(html) {
+  const atsPatterns = [
+    /boards\.greenhouse\.io\/[a-z0-9_-]+/gi,
+    /jobs\.lever\.co\/[a-z0-9_-]+/gi,
+    /jobs\.ashbyhq\.com\/[a-z0-9_-]+/gi,
+    /apply\.workable\.com\/[a-z0-9_-]+/gi,
+    /careers\.smartrecruiters\.com\/[a-z0-9_-]+/gi,
+    /[a-z0-9_-]+\.recruitee\.com/gi,
+    /[a-z0-9_-]+\.teamtailor\.com/gi,
+    /jobs\.breezy\.hr\/[a-z0-9_-]+/gi,
+  ];
+
+  const urls = new Set();
+  for (const pattern of atsPatterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      urls.add(`https://${match[0]}`);
+    }
+  }
+  return [...urls];
 }
 
 /**
@@ -210,11 +257,25 @@ function domainToName(domain) {
  */
 async function updateDomainStatus(db, domain, update) {
   try {
+    // Compute a simple domain quality score (0-1) based on probe results
+    const score = Math.min(1, (
+      (update.hasJsonLd ? 0.3 : 0) +
+      (update.hasJobLinks ? 0.3 : 0) +
+      Math.min(0.3, (update.jobCount || 0) * 0.03) +
+      (update.atsDetected ? 0.1 : 0)
+    ));
+
+    // Schedule next scan based on status
+    const scanDays = update.status === 'active' ? 7 : update.status === 'dead' ? 30 : 3;
+    const nextScanAt = new Date(Date.now() + scanDays * 86400000).toISOString();
+
     await db
       .prepare(
         `UPDATE domain_registry
              SET status = ?, career_url = ?, has_json_ld = ?, has_job_links = ?,
-                 job_count = ?, last_probed_at = CURRENT_TIMESTAMP
+                 job_count = ?, last_probed_at = CURRENT_TIMESTAMP,
+                 ats_detected = ?, probe_count = COALESCE(probe_count, 0) + 1,
+                 score = ?, next_scan_at = ?
              WHERE domain = ?`,
       )
       .bind(
@@ -223,6 +284,9 @@ async function updateDomainStatus(db, domain, update) {
         update.hasJsonLd ? 1 : 0,
         update.hasJobLinks ? 1 : 0,
         update.jobCount || 0,
+        update.atsDetected || null,
+        score,
+        nextScanAt,
         domain,
       )
       .run();
@@ -240,14 +304,17 @@ async function updateDomainStatus(db, domain, update) {
  * @param {string} domain
  * @param {string} sourceJobUrl - The job URL that led to discovering this domain.
  */
-export async function registerDomain(db, domain, sourceJobUrl) {
+export async function registerDomain(db, domain, sourceJobUrl, vector = null) {
   try {
     await db
       .prepare(
-        `INSERT OR IGNORE INTO domain_registry (domain, source_job_url)
-             VALUES (?, ?)`,
+        `INSERT INTO domain_registry (domain, source_job_url, discovery_vector, last_discovery_at)
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(domain) DO UPDATE SET
+               last_discovery_at = CURRENT_TIMESTAMP,
+               discovery_vector = COALESCE(excluded.discovery_vector, domain_registry.discovery_vector)`,
       )
-      .bind(domain, sourceJobUrl)
+      .bind(domain, sourceJobUrl, vector)
       .run();
   } catch (err) {
     logger.warn(
@@ -269,9 +336,13 @@ export async function batchRegisterDomains(db, domains) {
     const stmts = domains.map((d) =>
       db
         .prepare(
-          `INSERT OR IGNORE INTO domain_registry (domain, source_job_url) VALUES (?, ?)`,
+          `INSERT INTO domain_registry (domain, source_job_url, discovery_vector, last_discovery_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(domain) DO UPDATE SET
+                 last_discovery_at = CURRENT_TIMESTAMP,
+                 discovery_vector = COALESCE(excluded.discovery_vector, domain_registry.discovery_vector)`,
         )
-        .bind(d.domain, d.sourceJobUrl),
+        .bind(d.domain, d.sourceJobUrl, d.vector || null),
     );
 
     // Execute in batches of 40 (inside D1 batch limits)
@@ -284,7 +355,7 @@ export async function batchRegisterDomains(db, domains) {
     );
     // Fall back to individual registration
     for (const d of domains) {
-      await registerDomain(db, d.domain, d.sourceJobUrl);
+      await registerDomain(db, d.domain, d.sourceJobUrl, d.vector || null);
     }
   }
 }
@@ -300,7 +371,13 @@ export async function getPendingDomains(db, limit = 10) {
   try {
     const result = await db
       .prepare(
-        `SELECT domain FROM domain_registry WHERE status = 'pending' LIMIT ?`,
+        `SELECT domain FROM domain_registry
+         WHERE status = 'pending'
+            OR (status = 'dead' AND last_probed_at < datetime('now', '-7 days'))
+         ORDER BY
+           CASE WHEN status = 'pending' THEN 0 ELSE 1 END,
+           last_probed_at ASC NULLS FIRST
+         LIMIT ?`,
       )
       .bind(limit)
       .all();
@@ -310,5 +387,32 @@ export async function getPendingDomains(db, limit = 10) {
       `[CareerDetector] Failed to get pending domains: ${err.message}`,
     );
     return [];
+  }
+}
+
+/**
+ * Re-queue dead domains that haven't been probed in 7+ days.
+ * Gives dead domains a second chance — companies may fix broken career pages.
+ *
+ * @param {D1Database} db
+ * @returns {Promise<number>} Number of domains re-queued
+ */
+export async function requeueDeadDomains(db) {
+  try {
+    const result = await db.prepare(
+      `UPDATE domain_registry
+       SET status = 'pending'
+       WHERE status = 'dead'
+         AND last_probed_at < datetime('now', '-7 days')
+         AND probe_count < 3`
+    ).run();
+    const requeued = result?.meta?.changes || 0;
+    if (requeued > 0) {
+      logger.info(`[CareerDetector] Re-queued ${requeued} dead domains for retry`);
+    }
+    return requeued;
+  } catch (err) {
+    logger.warn(`[CareerDetector] Dead domain re-queue failed: ${err.message}`);
+    return 0;
   }
 }

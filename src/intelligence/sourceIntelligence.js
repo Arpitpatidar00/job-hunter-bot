@@ -133,85 +133,144 @@ export async function recalculatePriorities(db) {
         const result = await db.prepare(
             `SELECT url, type, success_count, failure_count, last_job_count,
                     avg_job_count, posting_frequency, last_new_job_at,
-                    total_jobs_found, consecutive_failures, dup_ratio
+                    total_jobs_found, consecutive_failures, dup_ratio,
+                    state, state_reason, last_success_at, last_failure_at
              FROM source_registry WHERE enabled = 1`
         ).all();
 
         if (!result.success || !result.results?.length) return 0;
 
+        const now = new Date().toISOString();
         const stmts = [];
         for (const source of result.results) {
-            // Auto-disable sources with too many consecutive failures (raised from 10 to 20)
-            if ((source.consecutive_failures || 0) >= 20) {
+            const currentState = source.state || 'active';
+            const consecutiveFailures = source.consecutive_failures || 0;
+            const totalAttempts = (source.success_count || 0) + (source.failure_count || 0);
+            const dupRatio = source.dup_ratio || 0;
+            const hoursSinceNew = source.last_new_job_at
+                ? (Date.now() - new Date(source.last_new_job_at).getTime()) / 3_600_000
+                : 9999;
+            const hoursSinceSuccess = source.last_success_at
+                ? (Date.now() - new Date(source.last_success_at).getTime()) / 3_600_000
+                : 9999;
+
+            let newState = currentState;
+            let stateReason = source.state_reason || '';
+
+            // ── State machine transitions ────────────────────────────────
+            // DEAD: 20+ consecutive failures → terminal (resurrectable after 48h)
+            if (consecutiveFailures >= 20) {
+                newState = 'dead';
+                stateReason = `${consecutiveFailures} consecutive failures`;
                 stmts.push(
-                    db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
-                        .bind(source.url)
+                    db.prepare(
+                        `UPDATE source_registry
+                         SET enabled = 0, crawl_tier = 'disabled',
+                             state = 'dead', state_reason = ?, state_updated_at = ?
+                         WHERE url = ?`
+                    ).bind(stateReason, now, source.url)
                 );
-                logger.warn(`[Intelligence] Auto-disabled source after 20 consecutive failures: ${source.url}`);
+                logger.warn(`[Intelligence] State → dead (${stateReason}): ${source.url}`);
                 continue;
             }
 
-            // Fix 9: Auto-disable zero-yield sources
-            // Sources with 0 unique jobs across many attempts AND high dup ratio → waste CPU
-            const totalAttempts = (source.success_count || 0) + (source.failure_count || 0);
-            const dupRatio = source.dup_ratio || 0;
-            if (totalAttempts >= 10 && (source.total_jobs_found || 0) === 0) {
+            // BLOCKED: 10+ failures in a row but under 20 → likely temporary block
+            if (consecutiveFailures >= 10) {
+                newState = 'blocked';
+                stateReason = `${consecutiveFailures} consecutive failures`;
                 stmts.push(
-                    db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
-                        .bind(source.url)
+                    db.prepare(
+                        `UPDATE source_registry
+                         SET crawl_tier = 'dormant', priority_score = 5,
+                             state = 'blocked', state_reason = ?, state_updated_at = ?
+                         WHERE url = ?`
+                    ).bind(stateReason, now, source.url)
                 );
-                logger.warn(`[Intelligence] Auto-disabled zero-yield source after ${totalAttempts} attempts: ${source.url}`);
+                logger.warn(`[Intelligence] State → blocked (${stateReason}): ${source.url}`);
                 continue;
             }
-            if (totalAttempts >= 10 && dupRatio > 0.95) {
-                // Check if any new jobs in last 7 days via freshness
-                const hoursSinceNew = source.last_new_job_at
-                    ? (Date.now() - new Date(source.last_new_job_at).getTime()) / 3_600_000
-                    : 9999;
-                if (hoursSinceNew > 168) { // > 7 days since last new job
-                    stmts.push(
-                        db.prepare(`UPDATE source_registry SET enabled = 0, crawl_tier = 'disabled' WHERE url = ?`)
-                            .bind(source.url)
-                    );
-                    logger.warn(`[Intelligence] Auto-disabled high-dup source (${(dupRatio * 100).toFixed(0)}% dupes, no new jobs in 7d): ${source.url}`);
-                    continue;
-                }
+
+            // LOW_YIELD: zero-yield after 10+ attempts, or >95% dup with no new jobs in 7d
+            if (totalAttempts >= 10 && (source.total_jobs_found || 0) === 0) {
+                newState = 'low_yield';
+                stateReason = 'zero yield after 10+ attempts';
+                stmts.push(
+                    db.prepare(
+                        `UPDATE source_registry
+                         SET crawl_tier = 'dormant', priority_score = 10,
+                             state = 'low_yield', state_reason = ?, state_updated_at = ?
+                         WHERE url = ?`
+                    ).bind(stateReason, now, source.url)
+                );
+                logger.warn(`[Intelligence] State → low_yield (${stateReason}): ${source.url}`);
+                continue;
+            }
+            if (totalAttempts >= 10 && dupRatio > 0.95 && hoursSinceNew > 168) {
+                newState = 'low_yield';
+                stateReason = `${(dupRatio * 100).toFixed(0)}% dupes, no new jobs in 7d`;
+                stmts.push(
+                    db.prepare(
+                        `UPDATE source_registry
+                         SET crawl_tier = 'dormant', priority_score = 10,
+                             state = 'low_yield', state_reason = ?, state_updated_at = ?
+                         WHERE url = ?`
+                    ).bind(stateReason, now, source.url)
+                );
+                logger.warn(`[Intelligence] State → low_yield (${stateReason}): ${source.url}`);
+                continue;
+            }
+
+            // COOLDOWN: active source with 3-9 consecutive failures → slow down
+            if (consecutiveFailures >= 3) {
+                newState = 'cooldown';
+                stateReason = `${consecutiveFailures} failures, cooling down`;
+            }
+            // ACTIVE: recover from cooldown/low_yield/blocked if recent success
+            else if ((currentState === 'cooldown' || currentState === 'low_yield' || currentState === 'blocked')
+                && hoursSinceSuccess < 24) {
+                newState = 'active';
+                stateReason = 'recovered after recent success';
+            }
+            // Remain active if healthy
+            else if (consecutiveFailures === 0 && currentState !== 'active') {
+                newState = 'active';
+                stateReason = 'healthy';
             }
 
             const score = calculatePriority(source);
             const { tier } = assignTier(score);
-            // Fix 8: Use adaptive interval based on posting frequency instead of fixed tier intervals
             const adaptiveInterval = getAdaptiveCrawlInterval(source);
             const { cycleInterval: tierInterval } = assignTier(score);
-            // Use the more aggressive of tier-based and adaptive intervals
             const effectiveInterval = Math.min(adaptiveInterval, tierInterval);
             const nextCrawlAt = new Date(Date.now() + effectiveInterval * 15 * 60_000).toISOString();
 
             stmts.push(
                 db.prepare(
                     `UPDATE source_registry
-                     SET priority_score = ?, crawl_tier = ?, next_crawl_at = ?
+                     SET priority_score = ?, crawl_tier = ?, next_crawl_at = ?,
+                         state = ?, state_reason = ?, state_updated_at = ?
                      WHERE url = ?`
-                ).bind(score, tier, nextCrawlAt, source.url)
+                ).bind(score, tier, nextCrawlAt, newState, stateReason, now, source.url)
             );
         }
 
-        // Periodic re-enable: give disabled sources another chance every 48 hours
-        // Re-enable at LOW priority (dormant tier) to minimize resource waste
+        // Resurrect dead/blocked sources after 48h cooldown period
         try {
             const reEnableResult = await db.prepare(
                 `UPDATE source_registry
-                 SET enabled = 1, consecutive_failures = 0, crawl_tier = 'dormant', priority_score = 20
+                 SET enabled = 1, consecutive_failures = 0, crawl_tier = 'dormant',
+                     priority_score = 20, state = 'active', state_reason = 'resurrected after 48h cooldown',
+                     state_updated_at = ?
                  WHERE enabled = 0
-                   AND crawl_tier = 'disabled'
-                   AND last_fetched_at < datetime('now', '-48 hours')`
-            ).run();
+                   AND state IN ('dead', 'blocked')
+                   AND state_updated_at < datetime('now', '-48 hours')`
+            ).bind(now).run();
             const reEnabled = reEnableResult?.meta?.changes || 0;
             if (reEnabled > 0) {
-                logger.info(`[Intelligence] Re-enabled ${reEnabled} previously disabled sources for retry`);
+                logger.info(`[Intelligence] Resurrected ${reEnabled} dead/blocked sources for retry`);
             }
         } catch (reErr) {
-            logger.warn(`[Intelligence] Re-enable check failed: ${reErr.message}`);
+            logger.warn(`[Intelligence] Resurrection check failed: ${reErr.message}`);
         }
 
         // D1 batch — fixed from 100 to 40 to stay within D1 per-batch limit
@@ -243,9 +302,10 @@ export async function getSourcesForCycle(db, cycleNumber) {
         // Always fetch high-priority sources
         // For others, check if cycleNumber aligns with their interval (updated intervals)
         const result = await db.prepare(
-            `SELECT url, type, name, priority_score, crawl_tier
+            `SELECT url, type, name, priority_score, crawl_tier, state
              FROM source_registry
              WHERE enabled = 1
+               AND (state IS NULL OR state IN ('active', 'cooldown'))
                AND (
                    crawl_tier = 'high'
                    OR (crawl_tier = 'medium' AND ? % 3 = 0)

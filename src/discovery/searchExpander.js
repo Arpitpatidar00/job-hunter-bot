@@ -41,6 +41,18 @@ const SEARCH_BACKENDS = [
       `https://search.brave.com/search?q=${encodeURIComponent(q)}&source=web`,
     extractUrls: extractGenericResultUrls,
   },
+  {
+    name: "google_cse",
+    buildUrl: (q, env) => {
+      // Uses Google Custom Search Engine API if keys are configured
+      const apiKey = env?.GOOGLE_CSE_API_KEY || '';
+      const cseId = env?.GOOGLE_CSE_ID || '';
+      if (!apiKey || !cseId) return null;
+      return `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(q)}&num=10`;
+    },
+    extractUrls: extractGoogleCseUrls,
+    isJson: true,
+  },
 ];
 
 /** KV key for tracking discovery run stats (read by daily report). */
@@ -83,7 +95,7 @@ function hashQuery(query) {
  * @param {KVNamespace} [kv]
  * @returns {Promise<string[]>} URLs from search results.
  */
-async function searchWithCache(query, kv) {
+async function searchWithCache(query, kv, env) {
   const cacheKey = `search:cache:${hashQuery(query)}`;
 
   // Try cache first
@@ -103,7 +115,7 @@ async function searchWithCache(query, kv) {
   }
 
   // Cache miss — perform live search
-  const urls = await searchMultiBackend(query);
+  const urls = await searchMultiBackend(query, env);
 
   // Store result in cache (only if we got results)
   if (kv && urls.length > 0) {
@@ -182,6 +194,7 @@ export async function runSearchExpansion(
   kv = null,
   maxSearches = 8,
   maxDomainsPerSearch = 20,
+  env = null,
 ) {
   let totalNewAts = 0;
   let totalNewDomains = 0;
@@ -206,7 +219,7 @@ export async function runSearchExpansion(
     stats.attempted++;
     try {
       // Fix 5: Use cached search results to avoid repeated API calls
-      const urls = await searchWithCache(query, kv);
+      const urls = await searchWithCache(query, kv, env);
 
       if (!urls.length) {
         logger.info(`[SearchExpander] No results for query: "${query}"`);
@@ -225,7 +238,7 @@ export async function runSearchExpansion(
       // 2. Extract unique domains and queue for career page detection
       const domains = extractDomains(urls, maxDomainsPerSearch);
       for (const { domain, sourceUrl } of domains) {
-        await registerDomain(db, domain, sourceUrl);
+        await registerDomain(db, domain, sourceUrl, 'search');
         totalNewDomains++;
         stats.domainsQueued++;
       }
@@ -318,25 +331,25 @@ export async function runSearchExpansion(
  * @param {string} query
  * @returns {Promise<string[]>} Extracted URLs from search results.
  */
-async function searchMultiBackend(query) {
+async function searchMultiBackend(query, env) {
   for (const backend of SEARCH_BACKENDS) {
     try {
-      const url = backend.buildUrl(query);
-      const res = await fetchWithTimeout(
-        url,
-        {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",
-            DNT: "1",
-          },
-        },
-        12_000,
-      );
+      const url = backend.buildUrl(query, env);
+      if (!url) continue; // Backend not configured (e.g. missing API key)
+
+      const headers = backend.isJson
+        ? { Accept: 'application/json', 'User-Agent': 'JobHunterBot/5.1' }
+        : {
+          "User-Agent":
+            "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Encoding": "gzip, deflate",
+          DNT: "1",
+        };
+
+      const res = await fetchWithTimeout(url, { headers }, 12_000);
 
       if (!res.ok) {
         logger.warn(
@@ -345,23 +358,25 @@ async function searchMultiBackend(query) {
         continue;
       }
 
-      const html = await res.text();
+      const text = await res.text();
 
-      // ── CAPTCHA / rate-limit detection ────────────────────────────────
-      if (
-        html.length < 500 ||
-        html.toLowerCase().includes("captcha") ||
-        html.toLowerCase().includes("unusual traffic") ||
-        html.toLowerCase().includes("access denied") ||
-        html.toLowerCase().includes("rate limit")
-      ) {
-        logger.warn(
-          `[SearchExpander] ${backend.name} appears rate-limited or blocked (html=${html.length} chars) — trying next backend`,
-        );
-        continue;
+      // Skip CAPTCHA/rate-limit detection for JSON APIs
+      if (!backend.isJson) {
+        if (
+          text.length < 500 ||
+          text.toLowerCase().includes("captcha") ||
+          text.toLowerCase().includes("unusual traffic") ||
+          text.toLowerCase().includes("access denied") ||
+          text.toLowerCase().includes("rate limit")
+        ) {
+          logger.warn(
+            `[SearchExpander] ${backend.name} appears rate-limited or blocked (html=${text.length} chars) — trying next backend`,
+          );
+          continue;
+        }
       }
 
-      const urls = backend.extractUrls(html);
+      const urls = backend.extractUrls(text);
 
       if (urls.length === 0) {
         logger.warn(
@@ -452,6 +467,30 @@ function extractGenericResultUrls(html) {
     }
   }
 
+  return [...new Set(urls)];
+}
+
+/**
+ * Extract URLs from Google Custom Search API JSON response.
+ * @param {string} jsonText - Raw JSON response text
+ * @returns {string[]}
+ */
+function extractGoogleCseUrls(jsonText) {
+  const urls = [];
+  try {
+    const data = JSON.parse(jsonText);
+    const items = data.items || [];
+    for (const item of items) {
+      if (item.link) {
+        try {
+          new URL(item.link);
+          urls.push(item.link);
+        } catch { /* invalid URL */ }
+      }
+    }
+  } catch {
+    // JSON parse failed — return empty
+  }
   return [...new Set(urls)];
 }
 
@@ -593,6 +632,130 @@ function getStaticFallbackSources() {
       url: "https://apply.workable.com/api/v3/accounts/browserbase/jobs",
       type: "workable",
       name: "Browserbase",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    // SmartRecruiters boards
+    {
+      url: "https://api.smartrecruiters.com/v1/companies/visa/postings",
+      type: "smartrecruiters",
+      name: "Visa",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.smartrecruiters.com/v1/companies/bosch/postings",
+      type: "smartrecruiters",
+      name: "Bosch",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.smartrecruiters.com/v1/companies/spotify/postings",
+      type: "smartrecruiters",
+      name: "Spotify",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    // Recruitee boards
+    {
+      url: "https://paradox.recruitee.com/api/offers",
+      type: "recruitee",
+      name: "Paradox",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    // Additional Greenhouse (high-value companies)
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/cloudflare/jobs",
+      type: "greenhouse",
+      name: "Cloudflare",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/datadog/jobs",
+      type: "greenhouse",
+      name: "Datadog",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/mongodb/jobs",
+      type: "greenhouse",
+      name: "MongoDB",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/grafanalabs/jobs",
+      type: "greenhouse",
+      name: "Grafana Labs",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/snyk/jobs",
+      type: "greenhouse",
+      name: "Snyk",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://boards-api.greenhouse.io/v1/boards/cockroachlabs/jobs",
+      type: "greenhouse",
+      name: "CockroachDB",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    // Additional Lever (high-value companies)
+    {
+      url: "https://api.lever.co/v0/postings/stripe",
+      type: "lever",
+      name: "Stripe",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.lever.co/v0/postings/deel",
+      type: "lever",
+      name: "Deel",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.lever.co/v0/postings/mercury",
+      type: "lever",
+      name: "Mercury",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.lever.co/v0/postings/webflow",
+      type: "lever",
+      name: "Webflow",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    // Additional Ashby (high-value companies)
+    {
+      url: "https://api.ashbyhq.com/posting-api/job-board/posthog",
+      type: "ashby",
+      name: "PostHog",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.ashbyhq.com/posting-api/job-board/resend",
+      type: "ashby",
+      name: "Resend",
+      enabled: true,
+      discovery_origin: "static_fallback",
+    },
+    {
+      url: "https://api.ashbyhq.com/posting-api/job-board/linear",
+      type: "ashby",
+      name: "Linear",
       enabled: true,
       discovery_origin: "static_fallback",
     },

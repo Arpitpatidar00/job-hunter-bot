@@ -15,6 +15,16 @@ import { fetchLeverJobs } from "./lever.js";
 import { fetchAshbyJobs } from "./ashby.js";
 import { fetchWorkableJobs } from "./workable.js";
 import { fetchCareerPageJobs } from "./careerPage.js";
+import { fetchSmartRecruitersJobs } from "./smartrecruiters.js";
+import { fetchTeamtailorJobs } from "./teamtailor.js";
+import { fetchRecruiteeJobs } from "./recruitee.js";
+import { fetchWorkdayJobs } from "./workday.js";
+import { fetchBreezyJobs } from "./breezy.js";
+import { fetchRipplingJobs } from "./rippling.js";
+import { fetchPinpointJobs } from "./pinpoint.js";
+import { fetchDoverJobs } from "./dover.js";
+import { fetchFreshteamJobs } from "./freshteam.js";
+import { fetchJobviteJobs } from "./jobvite.js";
 import { buildSourceList, groupByType, setRateLimitKV } from "./base.js";
 import logger from "../core/logger.js";
 
@@ -46,16 +56,26 @@ const CONNECTOR_MAP = {
   lever: (sources, config, kv) => fetchLeverJobs(sources, config, kv),
   ashby: (sources, config, kv) => fetchAshbyJobs(sources, config, kv),
   workable: (sources, config, kv) => fetchWorkableJobs(sources, config, kv),
+  smartrecruiters: (sources, config, kv) => fetchSmartRecruitersJobs(sources, config, kv),
+  teamtailor: (sources, config, kv) => fetchTeamtailorJobs(sources, config, kv),
+  recruitee: (sources, config, kv) => fetchRecruiteeJobs(sources, config, kv),
+  workday: (sources, config, kv) => fetchWorkdayJobs(sources, config, kv),
+  breezy: (sources, config, kv) => fetchBreezyJobs(sources, config, kv),
+  rippling: (sources, config, kv) => fetchRipplingJobs(sources, config, kv),
+  pinpoint: (sources, config, kv) => fetchPinpointJobs(sources, config, kv),
+  dover: (sources, config, kv) => fetchDoverJobs(sources, config, kv),
+  freshteam: (sources, config, kv) => fetchFreshteamJobs(sources, config, kv),
+  jobvite: (sources, config, kv) => fetchJobviteJobs(sources, config, kv),
   career_page: (sources, config) =>
     fetchCareerPageJobs(sources, config).then((r) => {
       // Normalize the career page result shape to match other connectors
       return r.items.length > 0 || r.stats.length > 0
         ? r.stats.map((s, i) => ({
-            feedUrl: s.url,
-            sourceName: s.name,
-            items: r.items.filter((j) => j.sourceUrl === s.url),
-            error: s.error,
-          }))
+          feedUrl: s.url,
+          sourceName: s.name,
+          items: r.items.filter((j) => j.sourceUrl === s.url),
+          error: s.error,
+        }))
         : [];
     }),
 };
@@ -72,7 +92,7 @@ export async function runAllConnectors(config, kv = null) {
   if (kv) {
     setRateLimitKV(kv);
   }
-  
+
   const jobs = [];
   const feedStats = [];
   let totalErrors = 0;
@@ -146,9 +166,9 @@ export async function runAllConnectors(config, kv = null) {
 
   logger.info(
     `[Connectors] Harvest complete | ` +
-      `Sources: ${allSources.length} (${sourceTypeSummary}) | ` +
-      `Jobs: ${jobs.length} | ` +
-      `Errors: ${totalErrors}`,
+    `Sources: ${allSources.length} (${sourceTypeSummary}) | ` +
+    `Jobs: ${jobs.length} | ` +
+    `Errors: ${totalErrors}`,
   );
 
   return {

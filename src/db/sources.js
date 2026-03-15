@@ -19,7 +19,7 @@ export async function registerDiscoveredSource(db, source) {
     if (!safeUrl) return;
 
     // Fix 8+10: Source cap with eviction — evict lowest-priority stale source to make room
-    const MAX_TOTAL_SOURCES = 500;
+    const MAX_TOTAL_SOURCES = 10000;
     const countResult = await db
       .prepare("SELECT COUNT(*) as cnt FROM source_registry")
       .first();
@@ -54,8 +54,8 @@ export async function registerDiscoveredSource(db, source) {
 
     await db
       .prepare(
-        `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin)
-             VALUES (?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin, state, ats_platform)
+             VALUES (?, ?, ?, ?, ?, 'active', ?)`,
       )
       .bind(
         safeUrl,
@@ -63,6 +63,7 @@ export async function registerDiscoveredSource(db, source) {
         safeName,
         source.enabled !== false ? 1 : 0,
         source.discovery_origin || "manual",
+        source.ats_platform || null,
       )
       .run();
   } catch (err) {
@@ -87,8 +88,8 @@ export async function batchRegisterDiscoveredSources(db, sources) {
       const safeName = source.name ? decodeURIComponent(source.name) : "";
       return db
         .prepare(
-          `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin)
-                 VALUES (?, ?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO source_registry (url, type, name, enabled, discovery_origin, state, ats_platform)
+                 VALUES (?, ?, ?, ?, ?, 'active', ?)`,
         )
         .bind(
           safeUrl,
@@ -96,6 +97,7 @@ export async function batchRegisterDiscoveredSources(db, sources) {
           safeName,
           source.enabled !== false ? 1 : 0,
           source.discovery_origin || "manual",
+          source.ats_platform || null,
         );
     });
 
@@ -149,6 +151,7 @@ export async function updateSourceStats(db, url, { success, jobCount }) {
                  SET success_count = success_count + 1,
                      consecutive_failures = 0,
                      last_fetched_at = CURRENT_TIMESTAMP,
+                     last_success_at = CURRENT_TIMESTAMP,
                      last_job_count = ?
                  WHERE url = ?`,
         )
@@ -160,7 +163,8 @@ export async function updateSourceStats(db, url, { success, jobCount }) {
           `UPDATE source_registry
                  SET failure_count = failure_count + 1,
                      consecutive_failures = consecutive_failures + 1,
-                     last_fetched_at = CURRENT_TIMESTAMP
+                     last_fetched_at = CURRENT_TIMESTAMP,
+                     last_failure_at = CURRENT_TIMESTAMP
                  WHERE url = ?`,
         )
         .bind(url)
@@ -192,6 +196,7 @@ export async function batchUpdateSourceStats(db, statsList) {
                      SET success_count = success_count + 1,
                          consecutive_failures = 0,
                          last_fetched_at = CURRENT_TIMESTAMP,
+                         last_success_at = CURRENT_TIMESTAMP,
                          last_job_count = ?
                      WHERE url = ?`,
           )
@@ -202,7 +207,8 @@ export async function batchUpdateSourceStats(db, statsList) {
             `UPDATE source_registry
                      SET failure_count = failure_count + 1,
                          consecutive_failures = consecutive_failures + 1,
-                         last_fetched_at = CURRENT_TIMESTAMP
+                         last_fetched_at = CURRENT_TIMESTAMP,
+                         last_failure_at = CURRENT_TIMESTAMP
                      WHERE url = ?`,
           )
           .bind(url);
@@ -217,7 +223,7 @@ export async function batchUpdateSourceStats(db, statsList) {
     logger.warn(`[D1] Batch source stats update failed: ${err.message}`);
     // Fall back to individual updates
     for (const stat of statsList) {
-      await updateSourceStats(db, stat.url, stat).catch(() => {});
+      await updateSourceStats(db, stat.url, stat).catch(() => { });
     }
   }
 }

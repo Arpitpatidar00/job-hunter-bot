@@ -51,8 +51,18 @@ import {
   batchRegisterDomains,
   getPendingDomains,
   probeDomainsForCareers,
+  requeueDeadDomains,
 } from "./discovery/careerDetector.js";
 import { runSearchExpansion } from "./discovery/searchExpander.js";
+import { runAtsEnumeration } from "./discovery/atsEnumerator.js";
+import { runVcPortfolioDiscovery } from "./discovery/vcPortfolioDiscovery.js";
+import { runInfrastructureMonitoring } from "./discovery/infrastructureMonitor.js";
+import { runEcosystemDiscovery } from "./discovery/ecosystemDiscovery.js";
+import { runJobBoardMining } from "./discovery/jobBoardMining.js";
+import { runApiDiscovery } from "./discovery/apiDiscovery.js";
+import { runDatasetIngestion } from "./discovery/datasetIngestor.js";
+import { runWebMining } from "./discovery/webMining.js";
+import { runFinancialSignals } from "./discovery/financialSignals.js";
 import {
   getAndIncrementCycle,
   recalculatePriorities,
@@ -403,6 +413,11 @@ async function queueHandler(batch, env, ctx) {
     queueName.endsWith("-alert-queue")
   ) {
     await sendAlerts(batch.messages, env, ctx);
+  } else if (
+    queueName === "discovery-queue" ||
+    queueName.endsWith("-discovery-queue")
+  ) {
+    await processDiscovery(batch.messages, env, ctx);
   } else {
     logger.error(`[Queue] Unknown queue: ${queueName}`);
     for (const msg of batch.messages) {
@@ -1220,6 +1235,293 @@ async function sendAlerts(messages, env, ctx) {
   }
 }
 
+// ── 4. Discovery Worker (Consumes DISCOVERY_QUEUE) ────────────────────────────
+/**
+ * Process discovery tasks from the discovery queue.
+ * Each message contains a discovery vector to run, isolating
+ * discovery work from the main crawl pipeline.
+ */
+async function processDiscovery(messages, env, ctx) {
+  const config = getConfig();
+  const allSources = buildSourceList(config);
+  const knownUrls = new Set(allSources.map(s => s.url));
+
+  for (const msg of messages) {
+    const task = msg.body;
+    const vector = task?.vector;
+    const vectorStart = Date.now();
+    let vectorResult = { newDomains: 0, newSources: 0, errors: 0, attempted: 0 };
+
+    try {
+      switch (vector) {
+        case 'infrastructure': {
+          const result = await runInfrastructureMonitoring(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Infrastructure: ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_infra: result.newSources });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+          break;
+        }
+        case 'ecosystem': {
+          const result = await runEcosystemDiscovery(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Ecosystem: ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_ecosystem: result.newSources });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+          break;
+        }
+        case 'job_board': {
+          const result = await runJobBoardMining(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Job Board Mining: ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_job_board: result.newSources });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+          break;
+        }
+        case 'api_discovery': {
+          const result = await runApiDiscovery(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] API Discovery: ${result.newSources} sources from ${result.domainsProbed} domains`);
+          bufferMetrics({ new_sources_api: result.newSources });
+          vectorResult = { newDomains: 0, newSources: result.newSources, errors: 0, attempted: result.domainsProbed || result.newSources };
+          break;
+        }
+        case 'dataset': {
+          const result = await runDatasetIngestion(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Dataset Ingestion: ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_dataset: result.newSources });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+          break;
+        }
+        case 'web_mining': {
+          const result = await runWebMining(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Web Mining: ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_web_mining: result.newSources });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+          break;
+        }
+        case 'career_probe': {
+          // Re-queue dead domains that haven't been probed in 7+ days
+          await requeueDeadDomains(env.DB);
+          const domains = await getPendingDomains(env.DB, task.options?.maxProbes || 15);
+          if (domains.length > 0) {
+            const registered = await probeDomainsForCareers(env.DB, domains, task.options?.maxProbes || 15);
+            logger.info(`[Discovery] Career Probe: ${domains.length} probed, ${registered.length} registered`);
+            bufferMetrics({ new_sources_career: registered.length });
+            vectorResult = { newDomains: 0, newSources: registered.length, errors: 0, attempted: domains.length };
+          }
+          break;
+        }
+        case 'ats_enum': {
+          const { newSources, probed, errors } = await runAtsEnumeration(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || { maxProbes: 25, maxPlatforms: 5 }
+          );
+          logger.info(`[Discovery] ATS Enum: ${newSources} new from ${probed} probes`);
+          bufferMetrics({ new_sources_ats: newSources });
+          vectorResult = { newDomains: 0, newSources: newSources, errors: errors || 0, attempted: probed || 0 };
+          break;
+        }
+        case 'vc_portfolio': {
+          const { newAtsSources, newDomains, portfoliosFetched } = await runVcPortfolioDiscovery(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options?.maxPortfolios || 2
+          );
+          logger.info(`[Discovery] VC Portfolio: ${portfoliosFetched} fetched, ${newAtsSources} ATS, ${newDomains} domains`);
+          bufferMetrics({ new_sources_ats: newAtsSources, new_domains_queued: newDomains });
+          vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: portfoliosFetched || 0 };
+          break;
+        }
+        case 'search': {
+          let dynamicQueries = config.searchExpansion?.queries ? [...config.searchExpansion.queries] : [];
+          if (config.searchExpansion?.baseQuery) dynamicQueries.push(config.searchExpansion.baseQuery);
+          try {
+            const { skillSpikes, hiringSurges } = await runGrowthEngineCycle(env.DB);
+            for (const spike of skillSpikes.slice(0, 2)) dynamicQueries.push(`${spike.skill} remote developer "careers"`);
+            for (const surge of hiringSurges.slice(0, 2)) dynamicQueries.push(`"${surge.company}" careers "open positions"`);
+          } catch { /* growth signals extraction failed — use static queries */ }
+          const { newAtsSources, newDomains } = await runSearchExpansion(
+            env.DB, dynamicQueries, knownUrls, env.SEEN_JOBS,
+            config.searchExpansion?.maxSearchesPerCycle || 8,
+            config.searchExpansion?.maxDomainsPerSearch || 20,
+            env,
+          );
+          logger.info(`[Discovery] Search: ${newAtsSources} ATS, ${newDomains} domains`);
+          bufferMetrics({ new_sources_search: newAtsSources, new_domains_queued: newDomains });
+          vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: dynamicQueries.length };
+          break;
+        }
+        case 'financial_signals': {
+          const result = await runFinancialSignals(
+            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+          );
+          logger.info(`[Discovery] Financial Signals: ${result.signalsDetected} signals, ${result.newDomains} domains, ${result.newSources} sources`);
+          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_financial: result.newSources, financial_signals_detected: result.signalsDetected });
+          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.signalsDetected || 0 };
+          break;
+        }
+        default:
+          logger.warn(`[Discovery] Unknown vector: ${vector}`);
+      }
+
+      // ── Write discovery_runs telemetry ────────────────────────────────
+      if (vector && vector !== 'unknown') {
+        const durationMs = Date.now() - vectorStart;
+        try {
+          await env.DB.prepare(
+            `INSERT INTO discovery_runs (vector, attempted, discovered, domains_queued, errors, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          ).bind(
+            vector,
+            vectorResult.attempted || ((vectorResult.newDomains || 0) + (vectorResult.newSources || 0) + (vectorResult.errors || 0)),
+            vectorResult.newSources || 0,
+            vectorResult.newDomains || 0,
+            vectorResult.errors || 0,
+            durationMs
+          ).run();
+        } catch (telErr) {
+          logger.warn(`[Discovery] Failed to write discovery_runs for ${vector}: ${telErr.message}`);
+        }
+
+        // ── Write discovery_metrics per-vector counters ─────────────────
+        try {
+          await env.DB.prepare(
+            `INSERT INTO discovery_metrics (vector, domains_found, sources_registered, probes_attempted, probes_successful, errors, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            vector,
+            vectorResult.newDomains || 0,
+            vectorResult.newSources || 0,
+            vectorResult.attempted || ((vectorResult.newDomains || 0) + (vectorResult.newSources || 0) + (vectorResult.errors || 0)),
+            (vectorResult.newDomains || 0) + (vectorResult.newSources || 0),
+            vectorResult.errors || 0,
+            durationMs
+          ).run();
+        } catch (metErr) {
+          logger.warn(`[Discovery] Failed to write discovery_metrics for ${vector}: ${metErr.message}`);
+        }
+      }
+
+      msg.ack();
+    } catch (err) {
+      logger.error(`[Discovery] Vector "${vector}" failed: ${err.message}`);
+      // Record failed run in telemetry
+      try {
+        await env.DB.prepare(
+          `INSERT INTO discovery_runs (vector, attempted, discovered, domains_queued, errors, duration_ms)
+           VALUES (?, 0, 0, 0, 1, ?)`
+        ).bind(vector || 'unknown', Date.now() - vectorStart).run();
+      } catch { /* telemetry write failed — non-critical */ }
+      msg.retry();
+    }
+  }
+
+  // Flush metrics from all processed discovery tasks
+  try {
+    await flushMetricsBuffer(env.DB);
+  } catch { /* non-critical */ }
+}
+
+/**
+ * Enqueue discovery tasks onto the discovery queue based on cycle cadences.
+ * This isolates discovery work from the producer path.
+ *
+ * @param {number} cycleNumber
+ * @param {object} env - Worker environment bindings
+ * @param {object} config - Bot configuration
+ */
+async function enqueueDiscoveryTasks(cycleNumber, env, config) {
+  const intel = config.crawlIntelligence || {};
+  const tasks = [];
+
+  // Career probe: every 4 cycles (~20 min at 5-min cron)
+  if (cycleNumber % (intel.careerProbeIntervalCycles || 4) === 0) {
+    tasks.push({ vector: 'career_probe', options: { maxProbes: intel.maxCareerProbes || 15 } });
+  }
+
+  // ATS enumeration: every 6 cycles (~30 min at 5-min cron)
+  if (cycleNumber % 6 === 0) {
+    tasks.push({ vector: 'ats_enum', options: { maxProbes: 25, maxPlatforms: 5 } });
+  }
+
+  // VC portfolio: every 12 cycles (~1 hour at 5-min cron)
+  if (cycleNumber % 12 === 0) {
+    tasks.push({ vector: 'vc_portfolio', options: { maxPortfolios: 2 } });
+  }
+
+  // Search expansion: every 8 cycles or force after 72h dry spell
+  const DISCOVERY_INTERVAL_CYCLES = intel.searchIntervalCycles || 8;
+  let forceSearch = false;
+  try {
+    const lastSuccessRaw = await env.SEEN_JOBS.get("discovery:last_success_timestamp");
+    if (lastSuccessRaw) {
+      const msSinceSuccess = Date.now() - new Date(lastSuccessRaw).getTime();
+      if (msSinceSuccess > 72 * 60 * 60 * 1000) forceSearch = true;
+    } else {
+      forceSearch = true;
+    }
+  } catch { /* KV read failed */ }
+
+  if (config.searchExpansion?.enabled && (forceSearch || cycleNumber % DISCOVERY_INTERVAL_CYCLES === 0)) {
+    tasks.push({ vector: 'search' });
+  }
+
+  // Infrastructure monitoring: every 8 cycles (~40 min at 5-min cron)
+  if (cycleNumber % 8 === 0) {
+    tasks.push({ vector: 'infrastructure', options: { enableReverseDns: cycleNumber % 48 === 0 } });
+  }
+
+  // Ecosystem discovery: every 24 cycles (~2 hours at 5-min cron)
+  if (cycleNumber % 24 === 0) {
+    tasks.push({ vector: 'ecosystem' });
+  }
+
+  // Job board mining: every 16 cycles (~80 min at 5-min cron)
+  if (cycleNumber % 16 === 0) {
+    tasks.push({ vector: 'job_board' });
+  }
+
+  // API discovery: every 12 cycles (~1 hour at 5-min cron)
+  if (cycleNumber % 12 === 0) {
+    tasks.push({ vector: 'api_discovery', options: { maxDomains: 10 } });
+  }
+
+  // Dataset ingestion: every 96 cycles (~8 hours at 5-min cron)
+  if (cycleNumber % 96 === 0) {
+    tasks.push({ vector: 'dataset' });
+  }
+
+  // Web mining (Common Crawl / Sitemaps / Web Archive): every 48 cycles (~4 hours at 5-min cron)
+  if (cycleNumber % 48 === 0) {
+    tasks.push({ vector: 'web_mining' });
+  }
+
+  // Financial signals: every 24 cycles (~2 hours at 5-min cron)
+  if (cycleNumber % 24 === 0) {
+    tasks.push({ vector: 'financial_signals' });
+  }
+
+  // Enqueue all tasks
+  if (tasks.length > 0 && env.DISCOVERY_QUEUE) {
+    try {
+      await env.DISCOVERY_QUEUE.sendBatch(
+        tasks.map(task => ({ body: task }))
+      );
+      logger.info(`[Producer] Enqueued ${tasks.length} discovery tasks: ${tasks.map(t => t.vector).join(', ')}`);
+    } catch (err) {
+      logger.warn(`[Producer] Failed to enqueue discovery tasks: ${err.message}`);
+      // Fallback: run discovery inline if queue is unavailable
+      // (graceful degradation for environments without discovery queue)
+    }
+  }
+}
+
 /**
  * Cron producer implementation — contains the full business logic.
  * Issue 7: Extracted so the exported scheduled() can wrap it in a try-catch.
@@ -1396,127 +1698,14 @@ async function _scheduledImpl(event, env, ctx) {
     await retrainThresholds(env.DB, env.SEEN_JOBS);
   }
 
-  if (
-    isIntelEnabled &&
-    cycleNumber % (intel.careerProbeIntervalCycles || 4) === 0
-  ) {
+  // ── 3b. Enqueue discovery tasks to the discovery queue ────────────────
+  // All discovery vectors are now isolated in the discovery queue to prevent
+  // blocking the main crawl pipeline.
+  if (isIntelEnabled) {
     try {
-      const domains = await getPendingDomains(
-        env.DB,
-        intel.maxCareerProbes || 15,
-      );
-      if (domains.length > 0) {
-        const registered = await probeDomainsForCareers(
-          env.DB,
-          domains,
-          intel.maxCareerProbes || 15,
-        );
-        logger.info(
-          `[CareerDetector] Probed ${domains.length} domains, registered ${registered.length} career pages`,
-        );
-        if (registered.length > 0) {
-          bufferMetrics({
-            new_sources_career: registered.length,
-          });
-        }
-      }
+      await enqueueDiscoveryTasks(cycleNumber, env, config);
     } catch (err) {
-      logger.warn(`[CareerDetector] Career probing failed: ${err.message}`);
-    }
-  }
-
-  // ── Run source discovery on trigger cycle OR after 72h dry spell ──────
-  // FIX: lowered interval from 24→8 cycles so discovery runs more often.
-  // FIX: 72h force-run guard — if discovery hasn't found new sources in 72h,
-  //      force a discovery cycle regardless of cycle counter to ensure growth.
-  const DISCOVERY_INTERVAL_CYCLES = intel.searchIntervalCycles || 8;
-  const FORCE_DISCOVERY_AFTER_MS = 72 * 60 * 60 * 1000; // 72 hours
-
-  let forceDiscovery = false;
-  if (isIntelEnabled && config.searchExpansion?.enabled) {
-    try {
-      const lastSuccessRaw = await env.SEEN_JOBS.get(
-        "discovery:last_success_timestamp",
-      );
-      if (lastSuccessRaw) {
-        const msSinceSuccess = Date.now() - new Date(lastSuccessRaw).getTime();
-        if (msSinceSuccess > FORCE_DISCOVERY_AFTER_MS) {
-          forceDiscovery = true;
-          logger.warn(
-            `[SearchExpander] Force-running discovery — no new sources found in ${Math.round(msSinceSuccess / 3600_000)}h`,
-          );
-        }
-      } else {
-        // Never successfully run before — force first run
-        forceDiscovery = true;
-      }
-    } catch (err) {
-      logger.warn(
-        `[SearchExpander] Failed to read discovery last-success from KV: ${err.message}`,
-      );
-    }
-  }
-
-  if (
-    isIntelEnabled &&
-    config.searchExpansion?.enabled &&
-    (forceDiscovery || cycleNumber % DISCOVERY_INTERVAL_CYCLES === 0)
-  ) {
-    let dynamicQueries = config.searchExpansion?.queries
-      ? [...config.searchExpansion.queries]
-      : [];
-    try {
-      // Add base discovery query from config (moved from hardcoded)
-      if (config.searchExpansion?.baseQuery) {
-        dynamicQueries.push(config.searchExpansion.baseQuery);
-      }
-
-      // Fetch live market spikes to seed active search
-      const { skillSpikes, hiringSurges } = await runGrowthEngineCycle(env.DB);
-
-      // Add top 2 trending skills
-      for (const spike of skillSpikes.slice(0, 2)) {
-        dynamicQueries.push(`${spike.skill} remote developer "careers"`);
-      }
-      // Add top 2 surging companies
-      for (const surge of hiringSurges.slice(0, 2)) {
-        dynamicQueries.push(`"${surge.company}" careers "open positions"`);
-      }
-    } catch (err) {
-      logger.warn(
-        `[SearchExpander] Failed to extract growth signals: ${err.message}`,
-      );
-    }
-
-    try {
-      const knownUrls = new Set(allSources.map((s) => s.url));
-      const { newAtsSources, newDomains } = await runSearchExpansion(
-        env.DB,
-        dynamicQueries,
-        knownUrls,
-        env.SEEN_JOBS, // Pass KV to track discovery states and limits
-        config.searchExpansion?.maxSearchesPerCycle || 8,
-        config.searchExpansion?.maxDomainsPerSearch || 20,
-      );
-      logger.info(
-        `[SearchExpander] Expansion: ${newAtsSources} ATS sources, ${newDomains} domains queued`,
-      );
-      if (newAtsSources > 0 || newDomains > 0) {
-        if (ctx && ctx.waitUntil) {
-          // Fix 6: Buffer metrics (will be flushed at end of _scheduledImpl)
-          bufferMetrics({
-            new_sources_search: newAtsSources,
-            new_domains_queued: newDomains,
-          });
-        } else {
-          bufferMetrics({
-            new_sources_search: newAtsSources,
-            new_domains_queued: newDomains,
-          });
-        }
-      }
-    } catch (err) {
-      logger.warn(`[SearchExpander] Search expansion failed: ${err.message}`);
+      logger.warn(`[Producer] Discovery task enqueueing failed: ${err.message}`);
     }
   }
 

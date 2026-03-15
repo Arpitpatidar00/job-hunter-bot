@@ -8,7 +8,7 @@
 --   last_new_job_at (0006), consecutive_failures (0005),
 --   failure_count (0005), discovery_origin (0005)
 -- Only last_error is new:
-ALTER TABLE source_registry ADD COLUMN last_error TEXT DEFAULT '';
+-- ALTER TABLE source_registry ADD COLUMN last_error TEXT DEFAULT '';
 
 -- jobs: track score and score breakdown for distribution reporting
 ALTER TABLE jobs ADD COLUMN score REAL DEFAULT 0;

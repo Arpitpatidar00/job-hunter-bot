@@ -103,9 +103,9 @@ export async function detectHiringSurge(db) {
         const result = await db.prepare(
             `SELECT company,
                     COUNT(*) as job_count,
-                    MAX(created_at) as last_post_at
+                    MAX(fetched_at) as last_post_at
              FROM jobs
-             WHERE created_at >= datetime('now', '-7 days')
+             WHERE fetched_at >= datetime('now', '-7 days')
                AND company != ''
              GROUP BY company
              HAVING job_count >= 5

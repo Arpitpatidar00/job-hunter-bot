@@ -45,13 +45,17 @@ const SEARCH_BACKENDS = [
     name: "google_cse",
     buildUrl: (q, env) => {
       // Uses Google Custom Search Engine API if keys are configured
-      const apiKey = env?.GOOGLE_CSE_API_KEY || '';
-      const cseId = env?.GOOGLE_CSE_ID || '';
+      const apiKey = env?.GOOGLE_CSE_API_KEY || "";
+      const cseId = env?.GOOGLE_CSE_ID || "";
       if (!apiKey || !cseId) return null;
       return `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(q)}&num=10`;
     },
     extractUrls: extractGoogleCseUrls,
     isJson: true,
+    name: "yahoo",
+    buildUrl: (q) =>
+      `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&n=20`,
+    extractUrls: extractGenericResultUrls,
   },
 ];
 
@@ -238,7 +242,7 @@ export async function runSearchExpansion(
       // 2. Extract unique domains and queue for career page detection
       const domains = extractDomains(urls, maxDomainsPerSearch);
       for (const { domain, sourceUrl } of domains) {
-        await registerDomain(db, domain, sourceUrl, 'search');
+        await registerDomain(db, domain, sourceUrl, "search");
         totalNewDomains++;
         stats.domainsQueued++;
       }
@@ -311,12 +315,12 @@ export async function runSearchExpansion(
   // ── End-of-run summary log ────────────────────────────────────────────────
   logger.info(
     `[SearchExpander] Expansion complete: ` +
-    `queries=${stats.attempted}, ` +
-    `ats=${totalNewAts}, ` +
-    `domains=${totalNewDomains}, ` +
-    `fallbacks=${stats.fallbackRegistered}, ` +
-    `failed=${stats.failed}, ` +
-    `kvWrites=${stats.kvWritesUsed}`,
+      `queries=${stats.attempted}, ` +
+      `ats=${totalNewAts}, ` +
+      `domains=${totalNewDomains}, ` +
+      `fallbacks=${stats.fallbackRegistered}, ` +
+      `failed=${stats.failed}, ` +
+      `kvWrites=${stats.kvWritesUsed}`,
   );
 
   return { newAtsSources: totalNewAts, newDomains: totalNewDomains };
@@ -338,16 +342,16 @@ async function searchMultiBackend(query, env) {
       if (!url) continue; // Backend not configured (e.g. missing API key)
 
       const headers = backend.isJson
-        ? { Accept: 'application/json', 'User-Agent': 'JobHunterBot/5.1' }
+        ? { Accept: "application/json", "User-Agent": "JobHunterBot/5.1" }
         : {
-          "User-Agent":
-            "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Accept-Encoding": "gzip, deflate",
-          DNT: "1",
-        };
+            "User-Agent":
+              "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            DNT: "1",
+          };
 
       const res = await fetchWithTimeout(url, { headers }, 12_000);
 
@@ -393,6 +397,8 @@ async function searchMultiBackend(query, env) {
       logger.warn(
         `[SearchExpander] ${backend.name} error: ${err.message} — trying next backend`,
       );
+      // Wait before trying the next backend to cool down IP block rates
+      await sleep(2000 + Math.random() * 2000);
     }
   }
 
@@ -440,7 +446,7 @@ function extractBingResultUrls(html) {
 }
 
 /**
- * Generic URL extractor — works with Brave and similar search engines.
+ * Generic URL extractor — works with Brave, Yahoo, and similar search engines.
  * Extracts all external hrefs from anchor tags.
  * @param {string} html
  * @returns {string[]}
@@ -456,7 +462,8 @@ function extractGenericResultUrls(html) {
     if (
       url.includes("brave.com") ||
       url.includes("duckduckgo.com") ||
-      url.includes("google.com")
+      url.includes("google.com") ||
+      url.includes("yahoo.com")
     )
       continue;
     try {
@@ -485,7 +492,9 @@ function extractGoogleCseUrls(jsonText) {
         try {
           new URL(item.link);
           urls.push(item.link);
-        } catch { /* invalid URL */ }
+        } catch {
+          /* invalid URL */
+        }
       }
     }
   } catch {

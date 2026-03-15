@@ -14,7 +14,7 @@ ALTER TABLE daily_metrics ADD COLUMN new_sources_financial INTEGER NOT NULL DEFA
 ALTER TABLE daily_metrics ADD COLUMN financial_signals_detected INTEGER NOT NULL DEFAULT 0;
 
 -- Add jobs_evaluated column if not already present (was in KNOWN_METRIC_COLUMNS but not schema)
-ALTER TABLE daily_metrics ADD COLUMN jobs_evaluated INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE daily_metrics ADD COLUMN jobs_evaluated INTEGER NOT NULL DEFAULT 0;
 
 -- Domain registry: add next_scan_at and score for scheduling
 ALTER TABLE domain_registry ADD COLUMN next_scan_at DATETIME;

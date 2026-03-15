@@ -6,7 +6,7 @@
 --   - New source types: smartrecruiters, teamtailor, recruitee
 
 -- Track discovery origin more granularly for analytics
-ALTER TABLE source_registry ADD COLUMN discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+-- ALTER TABLE source_registry ADD COLUMN discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 
 -- Index for exploration slot queries (recently discovered sources)
 CREATE INDEX IF NOT EXISTS idx_source_registry_discovered_at

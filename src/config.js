@@ -47,7 +47,7 @@ export function loadConfig() {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs",
         name: "HashiCorp",
-        enabled: true,
+        enabled: false,
       },
       {
         type: "greenhouse",
@@ -83,7 +83,7 @@ export function loadConfig() {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/supabase/jobs",
         name: "Supabase",
-        enabled: true,
+        enabled: false,
       },
       // Linear: crawled via Ashby connector (removed from Greenhouse to avoid cross-platform dupes)
       // Notion: crawled via Ashby connector (removed from Greenhouse to avoid cross-platform dupes)
@@ -116,7 +116,7 @@ export function loadConfig() {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/plaid/jobs",
         name: "Plaid",
-        enabled: true,
+        enabled: false,
       },
       {
         type: "greenhouse",
@@ -140,7 +140,7 @@ export function loadConfig() {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/dbtlabs/jobs",
         name: "dbt Labs v2",
-        enabled: true,
+        enabled: false,
       },
       {
         type: "greenhouse",
@@ -152,7 +152,7 @@ export function loadConfig() {
         type: "greenhouse",
         url: "https://boards-api.greenhouse.io/v1/boards/loom/jobs",
         name: "Loom",
-        enabled: true,
+        enabled: false,
       },
       {
         type: "greenhouse",

@@ -52,6 +52,8 @@ const SEARCH_BACKENDS = [
     },
     extractUrls: extractGoogleCseUrls,
     isJson: true,
+  },
+  {
     name: "yahoo",
     buildUrl: (q) =>
       `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&n=20`,

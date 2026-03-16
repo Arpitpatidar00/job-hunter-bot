@@ -87,10 +87,13 @@
 				"max_retries": 5
 			},
 			{
+				// Reduced batch size from 5→2: each discovery vector makes many
+				// external HTTP calls with rate-limit delays, so processing fewer
+				// per invocation prevents wall-time exhaustion.
 				"queue": "discovery-queue",
-				"max_batch_size": 5,
+				"max_batch_size": 2,
 				"max_batch_timeout": 5,
-				"max_retries": 2
+				"max_retries": 3
 			}
 		]
 	},

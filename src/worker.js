@@ -1246,7 +1246,26 @@ async function processDiscovery(messages, env, ctx) {
   const allSources = buildSourceList(config);
   const knownUrls = new Set(allSources.map(s => s.url));
 
+  // Wall-time guard: stop processing before Cloudflare terminates the worker.
+  // Queue consumers have a generous wall-time allowance, but discovery vectors
+  // make many external HTTP calls with rate-limit delays. Cap at 120s to leave
+  // headroom — unprocessed messages will be retried by the queue automatically.
+  const DISCOVERY_WALL_LIMIT_MS = 120_000;
+  const discoveryStart = Date.now();
+  let vectorsProcessed = 0;
+
   for (const msg of messages) {
+    // Check wall-time guard before starting each vector
+    if (Date.now() - discoveryStart > DISCOVERY_WALL_LIMIT_MS) {
+      logger.warn(
+        `[Discovery] Wall-time guard hit after ${vectorsProcessed} vectors ` +
+        `(${Date.now() - discoveryStart}ms). Returning ${messages.length - vectorsProcessed} messages to queue.`
+      );
+      // Retry remaining messages — they'll come back in the next consumer invocation
+      msg.retry();
+      continue;
+    }
+
     const task = msg.body;
     const vector = task?.vector;
     const vectorStart = Date.now();
@@ -1409,6 +1428,7 @@ async function processDiscovery(messages, env, ctx) {
       }
 
       msg.ack();
+      vectorsProcessed++;
     } catch (err) {
       logger.error(`[Discovery] Vector "${vector}" failed: ${err.message}`);
       // Record failed run in telemetry
@@ -1419,8 +1439,11 @@ async function processDiscovery(messages, env, ctx) {
         ).bind(vector || 'unknown', Date.now() - vectorStart).run();
       } catch { /* telemetry write failed — non-critical */ }
       msg.retry();
+      vectorsProcessed++;
     }
   }
+
+  logger.info(`[Discovery] Completed ${vectorsProcessed}/${messages.length} vectors in ${Date.now() - discoveryStart}ms`);
 
   // Flush metrics from all processed discovery tasks
   try {
@@ -1507,17 +1530,29 @@ async function enqueueDiscoveryTasks(cycleNumber, env, config) {
     tasks.push({ vector: 'financial_signals' });
   }
 
-  // Enqueue all tasks
+  // Enqueue discovery tasks individually with retry + pacing to avoid
+  // Cloudflare Queue rate limits ("Too Many Requests" on sendBatch).
   if (tasks.length > 0 && env.DISCOVERY_QUEUE) {
-    try {
-      await env.DISCOVERY_QUEUE.sendBatch(
-        tasks.map(task => ({ body: task }))
-      );
-      logger.info(`[Producer] Enqueued ${tasks.length} discovery tasks: ${tasks.map(t => t.vector).join(', ')}`);
-    } catch (err) {
-      logger.warn(`[Producer] Failed to enqueue discovery tasks: ${err.message}`);
-      // Fallback: run discovery inline if queue is unavailable
-      // (graceful degradation for environments without discovery queue)
+    let enqueued = 0;
+    for (const task of tasks) {
+      try {
+        await withRetry(
+          () => env.DISCOVERY_QUEUE.send(task),
+          3,
+          300,
+        );
+        enqueued++;
+        // Pacing: 150ms between sends to stay well within rate limits
+        if (enqueued < tasks.length) {
+          await new Promise(r => setTimeout(r, 150));
+        }
+      } catch (err) {
+        logger.warn(`[Producer] Failed to enqueue discovery task "${task.vector}": ${err.message}`);
+        // Continue with remaining tasks — don't let one failure block others
+      }
+    }
+    if (enqueued > 0) {
+      logger.info(`[Producer] Enqueued ${enqueued}/${tasks.length} discovery tasks: ${tasks.map(t => t.vector).join(', ')}`);
     }
   }
 }

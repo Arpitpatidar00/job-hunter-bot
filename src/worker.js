@@ -685,31 +685,13 @@ async function processFeeds(messages, env, ctx) {
 
       // ── DIRECT FALLBACK: Evaluate jobs inline when JOB_QUEUE is rate-limited ──
       if (!jobQueueSuccess && newJobs.length > 0) {
-        try {
-          // FIX: Limit direct evaluation to top 10 jobs max to avoid exceeding CPU time limits
-          const fallbackJobs = newJobs.slice(0, 10);
-          logger.info(
-            `[Fetcher] JOB_QUEUE failed. Critically evaluating top ${fallbackJobs.length} jobs directly...`,
-          );
-          if (ctx && ctx.waitUntil) {
-            ctx.waitUntil(
-              evaluateJobsFallback(fallbackJobs, env, ctx).catch((evalErr) =>
-                logger.error(
-                  `[Fetcher] Deferred eval fallback failed: ${evalErr.message}`,
-                ),
-              ),
-            );
-          } else {
-            await evaluateJobsFallback(fallbackJobs, env, ctx);
-            logger.info(
-              `[Fetcher] Direct evaluation completed for ${fallbackJobs.length} jobs`,
-            );
-          }
-        } catch (evalErr) {
-          logger.error(
-            `[Fetcher] Direct evaluation fallback failed: ${evalErr.message}`,
-          );
-        }
+        // FIX: Replaced inline evaluateJobsFallback with a simple drop.
+        // Direct evaluation blows past the 10ms CPU limit and crashes the worker with exceededCpu.
+        // Doing nothing is safe — these jobs will be retried (re-crawled and re-queued) on the next cycle
+        // because we haven't written to SEEN_JOBS yet, and D1 inserts have an IGNORE conflict clause.
+        logger.error(
+          `[Fetcher] JOB_QUEUE failed completely. Dropping ${newJobs.length} jobs to avoid exceededCpu. Will retry next cycle.`,
+        );
       }
 
       // Source Discovery (Layer 3+4)
@@ -1272,122 +1254,132 @@ async function processDiscovery(messages, env, ctx) {
     let vectorResult = { newDomains: 0, newSources: 0, errors: 0, attempted: 0 };
 
     try {
-      switch (vector) {
-        case 'infrastructure': {
-          const result = await runInfrastructureMonitoring(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Infrastructure: ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_infra: result.newSources });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
-          break;
-        }
-        case 'ecosystem': {
-          const result = await runEcosystemDiscovery(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Ecosystem: ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_ecosystem: result.newSources });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
-          break;
-        }
-        case 'job_board': {
-          const result = await runJobBoardMining(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Job Board Mining: ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_job_board: result.newSources });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
-          break;
-        }
-        case 'api_discovery': {
-          const result = await runApiDiscovery(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] API Discovery: ${result.newSources} sources from ${result.domainsProbed} domains`);
-          bufferMetrics({ new_sources_api: result.newSources });
-          vectorResult = { newDomains: 0, newSources: result.newSources, errors: 0, attempted: result.domainsProbed || result.newSources };
-          break;
-        }
-        case 'dataset': {
-          const result = await runDatasetIngestion(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Dataset Ingestion: ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_dataset: result.newSources });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
-          break;
-        }
-        case 'web_mining': {
-          const result = await runWebMining(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Web Mining: ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_web_mining: result.newSources });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
-          break;
-        }
-        case 'career_probe': {
-          // Re-queue dead domains that haven't been probed in 7+ days
-          await requeueDeadDomains(env.DB);
-          const domains = await getPendingDomains(env.DB, task.options?.maxProbes || 15);
-          if (domains.length > 0) {
-            const registered = await probeDomainsForCareers(env.DB, domains, task.options?.maxProbes || 15);
-            logger.info(`[Discovery] Career Probe: ${domains.length} probed, ${registered.length} registered`);
-            bufferMetrics({ new_sources_career: registered.length });
-            vectorResult = { newDomains: 0, newSources: registered.length, errors: 0, attempted: domains.length };
+      // FIX: Add a 110-second timeout to any single discovery vector to prevent 
+      // Cloudflare's 15-minute unhandled execution timeout crash.
+      const runVector = async () => {
+        switch (vector) {
+          case 'infrastructure': {
+            const result = await runInfrastructureMonitoring(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Infrastructure: ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_infra: result.newSources });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+            break;
           }
-          break;
+          case 'ecosystem': {
+            const result = await runEcosystemDiscovery(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Ecosystem: ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_ecosystem: result.newSources });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+            break;
+          }
+          case 'job_board': {
+            const result = await runJobBoardMining(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Job Board Mining: ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_job_board: result.newSources });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+            break;
+          }
+          case 'api_discovery': {
+            const result = await runApiDiscovery(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] API Discovery: ${result.newSources} sources from ${result.domainsProbed} domains`);
+            bufferMetrics({ new_sources_api: result.newSources });
+            vectorResult = { newDomains: 0, newSources: result.newSources, errors: 0, attempted: result.domainsProbed || result.newSources };
+            break;
+          }
+          case 'dataset': {
+            const result = await runDatasetIngestion(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Dataset Ingestion: ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_dataset: result.newSources });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+            break;
+          }
+          case 'web_mining': {
+            const result = await runWebMining(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Web Mining: ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_web_mining: result.newSources });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.newDomains + result.newSources };
+            break;
+          }
+          case 'career_probe': {
+            // Re-queue dead domains that haven't been probed in 7+ days
+            await requeueDeadDomains(env.DB);
+            const domains = await getPendingDomains(env.DB, task.options?.maxProbes || 15);
+            if (domains.length > 0) {
+              const registered = await probeDomainsForCareers(env.DB, domains, task.options?.maxProbes || 15);
+              logger.info(`[Discovery] Career Probe: ${domains.length} probed, ${registered.length} registered`);
+              bufferMetrics({ new_sources_career: registered.length });
+              vectorResult = { newDomains: 0, newSources: registered.length, errors: 0, attempted: domains.length };
+            }
+            break;
+          }
+          case 'ats_enum': {
+            const { newSources, probed, errors } = await runAtsEnumeration(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || { maxProbes: 25, maxPlatforms: 5 }
+            );
+            logger.info(`[Discovery] ATS Enum: ${newSources} new from ${probed} probes`);
+            bufferMetrics({ new_sources_ats: newSources });
+            vectorResult = { newDomains: 0, newSources: newSources, errors: errors || 0, attempted: probed || 0 };
+            break;
+          }
+          case 'vc_portfolio': {
+            const { newAtsSources, newDomains, portfoliosFetched } = await runVcPortfolioDiscovery(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options?.maxPortfolios || 2
+            );
+            logger.info(`[Discovery] VC Portfolio: ${portfoliosFetched} fetched, ${newAtsSources} ATS, ${newDomains} domains`);
+            bufferMetrics({ new_sources_ats: newAtsSources, new_domains_queued: newDomains });
+            vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: portfoliosFetched || 0 };
+            break;
+          }
+          case 'search': {
+            let dynamicQueries = config.searchExpansion?.queries ? [...config.searchExpansion.queries] : [];
+            if (config.searchExpansion?.baseQuery) dynamicQueries.push(config.searchExpansion.baseQuery);
+            try {
+              const { skillSpikes, hiringSurges } = await runGrowthEngineCycle(env.DB);
+              for (const spike of skillSpikes.slice(0, 2)) dynamicQueries.push(`${spike.skill} remote developer "careers"`);
+              for (const surge of hiringSurges.slice(0, 2)) dynamicQueries.push(`"${surge.company}" careers "open positions"`);
+            } catch { /* growth signals extraction failed — use static queries */ }
+            const { newAtsSources, newDomains } = await runSearchExpansion(
+              env.DB, dynamicQueries, knownUrls, env.SEEN_JOBS,
+              config.searchExpansion?.maxSearchesPerCycle || 8,
+              config.searchExpansion?.maxDomainsPerSearch || 20,
+              env,
+            );
+            logger.info(`[Discovery] Search: ${newAtsSources} ATS, ${newDomains} domains`);
+            bufferMetrics({ new_sources_search: newAtsSources, new_domains_queued: newDomains });
+            vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: dynamicQueries.length };
+            break;
+          }
+          case 'financial_signals': {
+            const result = await runFinancialSignals(
+              env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
+            );
+            logger.info(`[Discovery] Financial Signals: ${result.signalsDetected} signals, ${result.newDomains} domains, ${result.newSources} sources`);
+            bufferMetrics({ new_domains_queued: result.newDomains, new_sources_financial: result.newSources, financial_signals_detected: result.signalsDetected });
+            vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.signalsDetected || 0 };
+            break;
+          }
+          default:
+            logger.warn(`[Discovery] Unknown vector: ${vector}`);
         }
-        case 'ats_enum': {
-          const { newSources, probed, errors } = await runAtsEnumeration(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || { maxProbes: 25, maxPlatforms: 5 }
-          );
-          logger.info(`[Discovery] ATS Enum: ${newSources} new from ${probed} probes`);
-          bufferMetrics({ new_sources_ats: newSources });
-          vectorResult = { newDomains: 0, newSources: newSources, errors: errors || 0, attempted: probed || 0 };
-          break;
-        }
-        case 'vc_portfolio': {
-          const { newAtsSources, newDomains, portfoliosFetched } = await runVcPortfolioDiscovery(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options?.maxPortfolios || 2
-          );
-          logger.info(`[Discovery] VC Portfolio: ${portfoliosFetched} fetched, ${newAtsSources} ATS, ${newDomains} domains`);
-          bufferMetrics({ new_sources_ats: newAtsSources, new_domains_queued: newDomains });
-          vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: portfoliosFetched || 0 };
-          break;
-        }
-        case 'search': {
-          let dynamicQueries = config.searchExpansion?.queries ? [...config.searchExpansion.queries] : [];
-          if (config.searchExpansion?.baseQuery) dynamicQueries.push(config.searchExpansion.baseQuery);
-          try {
-            const { skillSpikes, hiringSurges } = await runGrowthEngineCycle(env.DB);
-            for (const spike of skillSpikes.slice(0, 2)) dynamicQueries.push(`${spike.skill} remote developer "careers"`);
-            for (const surge of hiringSurges.slice(0, 2)) dynamicQueries.push(`"${surge.company}" careers "open positions"`);
-          } catch { /* growth signals extraction failed — use static queries */ }
-          const { newAtsSources, newDomains } = await runSearchExpansion(
-            env.DB, dynamicQueries, knownUrls, env.SEEN_JOBS,
-            config.searchExpansion?.maxSearchesPerCycle || 8,
-            config.searchExpansion?.maxDomainsPerSearch || 20,
-            env,
-          );
-          logger.info(`[Discovery] Search: ${newAtsSources} ATS, ${newDomains} domains`);
-          bufferMetrics({ new_sources_search: newAtsSources, new_domains_queued: newDomains });
-          vectorResult = { newDomains: newDomains, newSources: newAtsSources, errors: 0, attempted: dynamicQueries.length };
-          break;
-        }
-        case 'financial_signals': {
-          const result = await runFinancialSignals(
-            env.DB, knownUrls, env.SEEN_JOBS, task.options || {}
-          );
-          logger.info(`[Discovery] Financial Signals: ${result.signalsDetected} signals, ${result.newDomains} domains, ${result.newSources} sources`);
-          bufferMetrics({ new_domains_queued: result.newDomains, new_sources_financial: result.newSources, financial_signals_detected: result.signalsDetected });
-          vectorResult = { newDomains: result.newDomains, newSources: result.newSources, errors: 0, attempted: result.signalsDetected || 0 };
-          break;
-        }
-        default:
-          logger.warn(`[Discovery] Unknown vector: ${vector}`);
-      }
+      };
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Vector execution timed out after 110s`)), 110_000);
+      });
+
+      await Promise.race([runVector(), timeoutPromise]);
 
       // ── Write discovery_runs telemetry ────────────────────────────────
       if (vector && vector !== 'unknown') {
@@ -1677,41 +1669,9 @@ async function _scheduledImpl(event, env, ctx) {
   // ── DIRECT FALLBACK: Process feeds inline when queues are rate-limited ──
   if (!queueSuccess) {
     // FIX: Parsing all sources inline will immediately exceed the 10ms-50ms CPU limit of Workers.
-    // Instead we only process the top 3 highest priority feeds directly, and let the next cron cycle
-    // pick up the rest.
-    const directStart = Date.now();
-    const DIRECT_BATCH_SIZE = 3;
-    let directProcessed = 0;
-    logger.info(
-      `[Producer] Direct mode: processing top ${DIRECT_BATCH_SIZE} priority sources inline to avoid exceededCpu...`,
-    );
-    const fakeMessages = sourcesToCrawl
-      .slice(0, DIRECT_BATCH_SIZE)
-      .map((s) => ({
-        body: s,
-        ack() { },
-        retry() { },
-      }));
-
-    try {
-      if (ctx && ctx.waitUntil) {
-        ctx.waitUntil(
-          processFeeds(fakeMessages, env, ctx).catch((err) =>
-            logger.error(
-              `[Producer] Deferred direct batch failed: ${err.message}`,
-            ),
-          ),
-        );
-      } else {
-        await processFeeds(fakeMessages, env, ctx);
-      }
-      directProcessed = fakeMessages.length;
-    } catch (err) {
-      logger.error(`[Producer] Direct batch failed: ${err.message}`);
-    }
-
-    logger.info(
-      `[Producer] Direct processing dispatched: ${directProcessed} critical sources (rest omitted).`,
+    // We just drop the job run for now and wait for the next cron trigger to preserve stability.
+    logger.error(
+      `[Producer] FEED_QUEUE failed completely. Dropping ${sourcesToCrawl.length} sources to avoid exceededCpu. Will retry next cycle.`,
     );
   }
 

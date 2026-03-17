@@ -144,27 +144,11 @@ describe("Discovery Engine Persistence", () => {
   test("writes only DISCOVERY_STATS_KEY when no new sources are discovered", async () => {
     const kv = createMockKv();
 
-    // All fallback sources already known
-    const knownSourceUrls = new Set([
-      "https://boards-api.greenhouse.io/v1/boards/vercel/jobs",
-      "https://boards-api.greenhouse.io/v1/boards/stripe/jobs",
-      "https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs",
-      "https://boards-api.greenhouse.io/v1/boards/discord/jobs",
-      "https://boards-api.greenhouse.io/v1/boards/figma/jobs",
-      "https://boards-api.greenhouse.io/v1/boards/netlify/jobs",
-      "https://api.lever.co/v0/postings/linear",
-      "https://api.lever.co/v0/postings/notion",
-      "https://api.lever.co/v0/postings/airtable",
-      "https://api.lever.co/v0/postings/remote",
-      "https://api.lever.co/v0/postings/descript",
-      "https://api.ashbyhq.com/posting-api/job-board/retool",
-      "https://api.ashbyhq.com/posting-api/job-board/supabase",
-      "https://api.ashbyhq.com/posting-api/job-board/cal",
-      "https://api.ashbyhq.com/posting-api/job-board/clerk",
-      "https://api.ashbyhq.com/posting-api/job-board/dub",
-      "https://api.ashbyhq.com/posting-api/job-board/plane",
-      "https://apply.workable.com/api/v3/accounts/browserbase/jobs",
-    ]);
+    // All fallback sources already known (duck-typed Set to avoid hardcoding URLs)
+    const knownSourceUrls = {
+      has: () => true,
+      add: () => {}
+    };
 
     const result = await runSearchExpansion(
       mockDb,

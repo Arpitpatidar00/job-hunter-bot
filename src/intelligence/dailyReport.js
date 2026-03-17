@@ -871,11 +871,19 @@ function getEngineStatus(
  * @param {string} reportText
  */
 async function sendDiscordReport(webhookUrl, reportText) {
+  // Discord message limit is 2000 chars. We use 8 chars for the ```\n ... \n``` block.
+  // We need to truncate the message cleanly so we don't hit a 400 Bad Request error.
+  const MAX_DISCORD_LEN = 1990;
+  let finalReport = reportText;
+  if (finalReport.length > MAX_DISCORD_LEN) {
+    finalReport = finalReport.substring(0, MAX_DISCORD_LEN - 20) + "\\n...[TRUNCATED]";
+  }
+
   const res = await fetch(webhookUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      content: `\`\`\`\n${reportText}\n\`\`\``,
+      content: `\`\`\`\n${finalReport}\n\`\`\``,
     }),
   });
 

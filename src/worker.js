@@ -317,7 +317,7 @@ function computeQuickKeywordScore(job, config) {
  * @param {number} [baseDelayMs=500] - Base delay in ms (doubles each attempt)
  * @returns {Promise<any>}
  */
-async function withRetry(fn, maxRetries = 3, baseDelayMs = 200) {
+async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -625,10 +625,10 @@ async function processFeeds(messages, env, ctx) {
       }
 
       // ── Send new jobs to JOB_QUEUE in chunks ────────────────────────────────
-      // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost.
+      // Issue 1: Reduced chunk size (50→20) to lower per-message CPU cost. -> Re-increased to 50 to avoid queue limit
       // Issue 4: slimJob() strips heavy text fields to stay under 128KB limit.
       // Issue 3: withRetry() absorbs Cloudflare Queue rate-limit errors before fallback.
-      const JOB_CHUNK_SIZE = 10;
+      const JOB_CHUNK_SIZE = 50;
       let queueMsgs = 0;
       let jobQueueSuccess = false;
       try {
@@ -1376,7 +1376,7 @@ async function processDiscovery(messages, env, ctx) {
       };
 
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error(`Vector execution timed out after 110s`)), 110_000);
+        setTimeout(() => reject(new Error(`Vector execution timed out after 600s`)), 600_000);
       });
 
       await Promise.race([runVector(), timeoutPromise]);
@@ -1648,8 +1648,8 @@ async function _scheduledImpl(event, env, ctx) {
   try {
     const batchMessages = sourcesToCrawl.map((s) => ({ body: s }));
     const batches = [];
-    for (let i = 0; i < batchMessages.length; i += 10) {
-      batches.push(batchMessages.slice(i, i + 10));
+    for (let i = 0; i < batchMessages.length; i += 50) {
+      batches.push(batchMessages.slice(i, i + 50));
     }
 
     for (const batch of batches) {

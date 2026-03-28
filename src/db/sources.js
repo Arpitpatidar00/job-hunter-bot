@@ -83,6 +83,49 @@ export async function batchRegisterDiscoveredSources(db, sources) {
   if (!sources || sources.length === 0) return;
 
   try {
+    // Fix 5: Enforce 10k source cap before batch insert (mirrors registerDiscoveredSource logic).
+    // Evict the oldest stale/low-priority sources to make room for new discoveries.
+    const MAX_TOTAL_SOURCES = 10000;
+    const countResult = await db
+      .prepare("SELECT COUNT(*) as cnt FROM source_registry")
+      .first();
+    const currentCount = countResult?.cnt || 0;
+    const potentialCount = currentCount + sources.length;
+
+    if (potentialCount > MAX_TOTAL_SOURCES) {
+      const overflow = potentialCount - MAX_TOTAL_SOURCES;
+      try {
+        const evictResult = await db
+          .prepare(
+            `DELETE FROM source_registry
+             WHERE url IN (
+               SELECT url FROM source_registry
+               WHERE enabled = 0
+                 OR (priority_score < 10 AND last_new_job_at < datetime('now', '-14 days'))
+                 OR (priority_score IS NULL AND last_fetched_at < datetime('now', '-14 days'))
+               ORDER BY priority_score ASC, last_fetched_at ASC
+               LIMIT ?
+             )`,
+          )
+          .bind(overflow)
+          .run();
+        const evicted = evictResult?.meta?.changes || 0;
+        if (evicted > 0) {
+          logger.info(
+            `[D1] Evicted ${evicted} stale sources to make room for ${sources.length} new batch sources`,
+          );
+        } else if (currentCount >= MAX_TOTAL_SOURCES) {
+          logger.warn(
+            `[D1] Source registry at cap (${MAX_TOTAL_SOURCES}), no evictable sources — some batch entries may be ignored`,
+          );
+        }
+      } catch (evictErr) {
+        logger.warn(
+          `[D1] Batch source eviction failed: ${evictErr.message}`,
+        );
+      }
+    }
+
     const stmts = sources.map((source) => {
       const safeUrl = source.url ? decodeURIComponent(source.url) : null;
       const safeName = source.name ? decodeURIComponent(source.name) : "";
@@ -113,6 +156,7 @@ export async function batchRegisterDiscoveredSources(db, sources) {
     }
   }
 }
+
 
 /**
  * Fetch all enabled sources from the registry.

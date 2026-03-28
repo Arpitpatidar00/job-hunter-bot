@@ -84,6 +84,7 @@ import {
   recordFeedResult,
   batchRecordFeedResults,
   getFeedHealthRecord,
+  batchGetFeedHealthRecords,
 } from "./intelligence/feedHealth.js";
 import {
   getEffectiveThreshold,
@@ -162,6 +163,24 @@ let _cachedConfig = null;
 function getConfig() {
   if (!_cachedConfig) _cachedConfig = loadConfig();
   return _cachedConfig;
+}
+
+// ── Module-Level Profile Cache (Fix 6) ────────────────────────────────────────
+/** Cache getActiveProfiles() at module level with a 10-minute TTL.
+ *  Profiles change rarely — skipping this D1 read on warm workers saves
+ *  ~1 query per evaluateJobs invocation at zero functional cost.
+ */
+let _profileCache = null;
+let _profileCacheTime = 0;
+const _PROFILE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function getCachedProfiles(db) {
+  const now = Date.now();
+  if (!_profileCache || now - _profileCacheTime > _PROFILE_CACHE_TTL_MS) {
+    _profileCache = await getActiveProfiles(db);
+    _profileCacheTime = now;
+  }
+  return _profileCache;
 }
 
 // ── Regex Cache for Keyword Matching ──────────────────────────────────────────
@@ -446,14 +465,23 @@ async function processFeeds(messages, env, ctx) {
     sources: atsSources,
   };
 
-  // Check circuit breakers, fetch ETags, and filter healthy sources
+  // Fix 1: Batch health checks — single D1 query + parallel KV reads for ALL sources.
+  // Reduces N D1 queries + N sequential KV reads → 1 D1 query + N parallel KV reads.
   const healthyFeeds = [];
   const healthySources = [];
 
-  // We import getFeedHealthRecord dynamically inside if not added at the top. Wait!
-  // I need to add the import at the top of worker.js. I'll do that in another replace.
+  const allSourceUrls = [
+    ...batchConfig.feeds.map((f) => f.url),
+    ...batchConfig.sources.map((s) => s.url),
+  ];
+  const healthRecordMap = await batchGetFeedHealthRecords(
+    env.DB,
+    env.SEEN_JOBS,
+    allSourceUrls,
+  );
+
   for (const feed of batchConfig.feeds) {
-    const record = await getFeedHealthRecord(env.DB, env.SEEN_JOBS, feed.url);
+    const record = healthRecordMap.get(feed.url) || { circuitOpen: false };
     if (record.circuitOpen) {
       logger.warn(`[Circuit] Skipping ${feed.url} — circuit is OPEN`);
     } else {
@@ -463,7 +491,7 @@ async function processFeeds(messages, env, ctx) {
     }
   }
   for (const src of batchConfig.sources) {
-    const record = await getFeedHealthRecord(env.DB, env.SEEN_JOBS, src.url);
+    const record = healthRecordMap.get(src.url) || { circuitOpen: false };
     if (record.circuitOpen) {
       logger.warn(`[Circuit] Skipping ${src.url} — circuit is OPEN`);
     } else {
@@ -862,7 +890,8 @@ async function evaluateJobs(messages, env, ctx) {
   // Issue 5: Reset per-invocation AI call counter at the start of each evaluateJobs run
   resetAiCallCount();
 
-  const profiles = await getActiveProfiles(env.DB);
+  // Fix 6: Use cached profiles (10-min TTL) to avoid redundant D1 reads on warm workers.
+  const profiles = await getCachedProfiles(env.DB);
   let activeProfiles = profiles.length
     ? profiles
     : [{ id: "default", notification_threshold: config.notificationThreshold }];

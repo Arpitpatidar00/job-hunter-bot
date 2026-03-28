@@ -101,64 +101,100 @@ export async function runAllConnectors(config, kv = null) {
   const allSources = buildSourceList(config);
   const grouped = groupByType(allSources);
 
-  for (const [type, sources] of grouped) {
-    const connector = CONNECTOR_MAP[type];
-    if (!connector) {
-      logger.warn(
-        `[Connectors] Unknown source type "${type}", skipping ${sources.length} sources`,
+  // Fix 4: Process different platform types in PARALLEL.
+  // Within each type, keep chunking + 1000ms delay to avoid same-platform 429s.
+  // This saves ~(N_types - 1) × chunk_delay seconds per cycle.
+  const typeResults = await Promise.allSettled(
+    [...grouped.entries()].map(async ([type, sources]) => {
+      const connector = CONNECTOR_MAP[type];
+      if (!connector) {
+        logger.warn(
+          `[Connectors] Unknown source type "${type}", skipping ${sources.length} sources`,
+        );
+        return { type, feedStats: [], errors: 0 };
+      }
+
+      logger.info(
+        `[Connectors] Running ${type} connector on ${sources.length} sources`,
       );
-      continue;
-    }
 
-    logger.info(
-      `[Connectors] Running ${type} connector on ${sources.length} sources`,
-    );
+      const typeStats = [];
+      let typeErrors = 0;
 
-    try {
-      const CHUNK_SIZE = 10;
-      for (let i = 0; i < sources.length; i += CHUNK_SIZE) {
-        const chunk = sources.slice(i, i + CHUNK_SIZE);
-        const results = await connector(chunk, config, kv);
+      try {
+        const CHUNK_SIZE = 10;
+        for (let i = 0; i < sources.length; i += CHUNK_SIZE) {
+          const chunk = sources.slice(i, i + CHUNK_SIZE);
+          const results = await connector(chunk, config, kv);
 
-        for (const result of results) {
-          feedStats.push({
-            type,
-            url: result.feedUrl,
-            name: result.sourceName,
-            count: result.items.length,
-            durationMs: result.durationMs || 0,
-            success: !result.error,
-            error: result.error || null,
-          });
+          for (const result of results) {
+            typeStats.push({
+              type,
+              url: result.feedUrl,
+              name: result.sourceName,
+              count: result.items.length,
+              durationMs: result.durationMs || 0,
+              success: !result.error,
+              error: result.error || null,
+              items: result.items,
+            });
 
-          if (result.error) {
-            totalErrors++;
-          } else {
-            for (const job of result.items) {
-              jobs.push(job);
+            if (result.error) {
+              typeErrors++;
             }
           }
-        }
 
-        // Delay between chunks to prevent 429s and burst fetch limits
-        if (i + CHUNK_SIZE < sources.length) {
-          await new Promise((r) => setTimeout(r, 1000));
+          // Delay between chunks of the SAME platform to prevent 429s
+          if (i + CHUNK_SIZE < sources.length) {
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      } catch (err) {
+        logger.error(`[Connectors] ${type} connector crashed: ${err.message}`);
+        typeErrors++;
+        typeStats.push({
+          type,
+          url: `connector:${type}`,
+          name: type,
+          count: 0,
+          durationMs: 0,
+          success: false,
+          error: err.message,
+          items: [],
+        });
+      }
+
+      return { type, feedStats: typeStats, errors: typeErrors };
+    }),
+  );
+
+  // Merge results from all parallel type runs
+  for (const result of typeResults) {
+    if (result.status === "rejected") {
+      logger.error(`[Connectors] Type runner failed: ${result.reason}`);
+      totalErrors++;
+      continue;
+    }
+    const { feedStats: typeStats, errors: typeErrors } = result.value;
+    totalErrors += typeErrors;
+    for (const stat of typeStats) {
+      feedStats.push({
+        type: stat.type,
+        url: stat.url,
+        name: stat.name,
+        count: stat.count,
+        durationMs: stat.durationMs,
+        success: stat.success,
+        error: stat.error,
+      });
+      if (!stat.error) {
+        for (const job of stat.items || []) {
+          jobs.push(job);
         }
       }
-    } catch (err) {
-      logger.error(`[Connectors] ${type} connector crashed: ${err.message}`);
-      totalErrors++;
-      feedStats.push({
-        type,
-        url: `connector:${type}`,
-        name: type,
-        count: 0,
-        durationMs: 0,
-        success: false,
-        error: err.message,
-      });
     }
   }
+
 
   const sourceTypeSummary = [...grouped.entries()]
     .map(([type, srcs]) => `${type}:${srcs.length}`)

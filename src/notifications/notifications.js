@@ -230,64 +230,58 @@ export async function sendAlert(job, scoreResult, options = {}) {
     const hasDiscord = discordUrl && isValidUrl(discordUrl);
     const hasTelegram = telegramToken && telegramChatId;
 
+    // Fix 7: Send Discord + Telegram in PARALLEL using Promise.allSettled.
+    // Cuts multi-channel wall-time by ~50% (from N sequential awaits to 1 concurrent round).
+    const channelPromises = [];
+
     // ── Discord ────────────────────────────────────────────────────────────
     if (hasDiscord) {
-        try {
-            const embed = buildDiscordEmbed(job, scoreResult);
-            // Add retry context footer if applicable
-            if (options.attempt > 1) {
-                embed.footer.text += ` | Retry ${options.attempt}`;
-            }
-
-            const res = await fetchWithRetry(discordUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ embeds: [embed] }),
-            });
-            if (!res.ok) throw new Error(`Discord ${res.status}: ${res.statusText}`);
-            stats.sent++;
-            stats.channels.push('Discord');
-        } catch (err) {
-            logger.error(`Discord alert failed for "${job.title}": ${err.message}`);
-            stats.failed++;
-            errors.push(err);
-        }
+        channelPromises.push(
+            (async () => {
+                const embed = buildDiscordEmbed(job, scoreResult);
+                if (options.attempt > 1) {
+                    embed.footer.text += ` | Retry ${options.attempt}`;
+                }
+                const res = await fetchWithRetry(discordUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ embeds: [embed] }),
+                });
+                if (!res.ok) throw new Error(`Discord ${res.status}: ${res.statusText}`);
+                return 'Discord';
+            })(),
+        );
     } else if (discordUrl && !isValidUrl(discordUrl)) {
         logger.warn(`Discord webhook URL is invalid: "${discordUrl}"`);
     }
 
     // ── Telegram ───────────────────────────────────────────────────────────
     if (hasTelegram) {
-        try {
-            const tgUrl = `https://api.telegram.org/bot${telegramToken}/sendMessage`;
-            const text = buildTelegramMessage(job, scoreResult);
-            // Append retry context if applicable
-            let finalText = text;
-            if (options.attempt > 1) {
-                finalText += `\n\n_Retry attempt: ${options.attempt}_`;
-            }
-
-            const res = await fetch(tgUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: telegramChatId,
-                    text: finalText,
-                    parse_mode: 'MarkdownV2',
-                    disable_web_page_preview: false,
-                }),
-            });
-            if (!res.ok) {
-                const body = await res.text();
-                throw new Error(`Telegram ${res.status}: ${body}`);
-            }
-            stats.sent++;
-            stats.channels.push('Telegram');
-        } catch (err) {
-            logger.error(`Telegram alert failed for "${job.title}": ${err.message}`);
-            stats.failed++;
-            errors.push(err);
-        }
+        channelPromises.push(
+            (async () => {
+                const tgUrl = `https://api.telegram.org/bot${telegramToken}/sendMessage`;
+                const text = buildTelegramMessage(job, scoreResult);
+                let finalText = text;
+                if (options.attempt > 1) {
+                    finalText += `\n\n_Retry attempt: ${options.attempt}_`;
+                }
+                const res = await fetch(tgUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: telegramChatId,
+                        text: finalText,
+                        parse_mode: 'MarkdownV2',
+                        disable_web_page_preview: false,
+                    }),
+                });
+                if (!res.ok) {
+                    const body = await res.text();
+                    throw new Error(`Telegram ${res.status}: ${body}`);
+                }
+                return 'Telegram';
+            })(),
+        );
     }
 
     // ── No channels ────────────────────────────────────────────────────────
@@ -297,6 +291,21 @@ export async function sendAlert(job, scoreResult, options = {}) {
             `${job.title} — ${job.link} (no channels configured)`
         );
         stats.channels.push('mock');
+    }
+
+    // Wait for all parallel sends and collect results
+    if (channelPromises.length > 0) {
+        const results = await Promise.allSettled(channelPromises);
+        for (const result of results) {
+            if (result.status === 'fulfilled') {
+                stats.sent++;
+                stats.channels.push(result.value);
+            } else {
+                logger.error(`Alert channel failed for "${job.title}": ${result.reason?.message}`);
+                stats.failed++;
+                errors.push(result.reason);
+            }
+        }
     }
 
     if (stats.sent > 0) {
@@ -310,3 +319,4 @@ export async function sendAlert(job, scoreResult, options = {}) {
 
     return stats;
 }
+

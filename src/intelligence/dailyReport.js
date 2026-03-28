@@ -228,6 +228,21 @@ async function mergeSkillCounts(db, date, newCounts) {
   }
 }
 
+// ── Date Range Helper (Fix 3) ────────────────────────────────────────────────
+
+/**
+ * Convert a YYYY-MM-DD date string to an ISO range pair.
+ * Allows D1/SQLite to use a B-tree index on fetched_at instead of a full scan.
+ * @param {string} dateStr - e.g. "2026-03-28"
+ * @returns {{ start: string, end: string }}
+ */
+function toDateRange(dateStr) {
+  return {
+    start: `${dateStr}T00:00:00.000Z`,
+    end: `${dateStr}T23:59:59.999Z`,
+  };
+}
+
 // ── Report Data Fetcher ───────────────────────────────────────────────────────
 
 /**
@@ -249,30 +264,34 @@ export async function getDailyReportData(db, options = {}) {
     .toISOString()
     .split("T")[0];
 
+  // Fix 3: Build ISO range pairs — allows SQLite to use idx_jobs_fetched_at B-tree index.
+  const { start: todayStart, end: todayEnd } = toDateRange(date);
+  const { start: prevStart, end: prevEnd } = toDateRange(prevDate);
+
   try {
     // ── Core queries (daily_metrics + jobs — these tables always exist) ──
     const [todayRes, yesterdayRes, jobCountRes, prevJobCountRes, companiesRes] =
       await db.batch([
         db.prepare(`SELECT * FROM daily_metrics WHERE date = ?`).bind(date),
         db.prepare(`SELECT * FROM daily_metrics WHERE date = ?`).bind(prevDate),
-        // Ground-truth: count jobs inserted today directly from the jobs table
+        // Fix 3: Range query — index-friendly instead of date() full scan
         db
           .prepare(
-            `SELECT COUNT(*) as count FROM jobs WHERE date(fetched_at) = ?`,
+            `SELECT COUNT(*) as count FROM jobs WHERE fetched_at >= ? AND fetched_at <= ?`,
           )
-          .bind(date),
-        // Ground-truth: count jobs inserted previous day
+          .bind(todayStart, todayEnd),
+        // Fix 3: Range query for previous day
         db
           .prepare(
-            `SELECT COUNT(*) as count FROM jobs WHERE date(fetched_at) = ?`,
+            `SELECT COUNT(*) as count FROM jobs WHERE fetched_at >= ? AND fetched_at <= ?`,
           )
-          .bind(prevDate),
-        // Ground-truth: count distinct companies (proxy for sources) today
+          .bind(prevStart, prevEnd),
+        // Fix 3: Range query on company field
         db
           .prepare(
-            `SELECT COUNT(DISTINCT company) as count FROM jobs WHERE company != '' AND date(fetched_at) = ?`,
+            `SELECT COUNT(DISTINCT company) as count FROM jobs WHERE company != '' AND fetched_at >= ? AND fetched_at <= ?`,
           )
-          .bind(date),
+          .bind(todayStart, todayEnd),
       ]);
 
     const today = todayRes.results?.[0] || {};
@@ -305,12 +324,12 @@ export async function getDailyReportData(db, options = {}) {
                         SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) as disabled
                     FROM source_registry
                 `),
-        // Ground-truth: count sources that were fetched today
+        // Fix 3: Range query for last_fetched_at (index-friendly)
         db
           .prepare(
-            `SELECT COUNT(*) as count FROM source_registry WHERE date(last_fetched_at) = ?`,
+            `SELECT COUNT(*) as count FROM source_registry WHERE last_fetched_at >= ? AND last_fetched_at <= ?`,
           )
-          .bind(date),
+          .bind(todayStart, todayEnd),
         // Top failing sources for report diagnostics
         db.prepare(`
                     SELECT name, url, failure_count, consecutive_failures, last_error
@@ -340,6 +359,7 @@ export async function getDailyReportData(db, options = {}) {
     } catch (err) {
       logger.warn(`[DailyReport] sent_alerts not available: ${err.message}`);
     }
+
 
     // ── Score histogram from D1 + discovery stats from KV ─────────────────
     let scoreHistogram = {};

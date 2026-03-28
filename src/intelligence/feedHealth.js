@@ -372,6 +372,61 @@ export async function getFeedHealthReport(db, kv, feedUrls) {
 }
 
 /**
+ * Batch-fetch health records for multiple URLs in a single D1 query + parallel KV reads.
+ * Reduces N+1 subrequests (N D1 + N KV seq) to 1+N (1 D1 batch + N KV parallel).
+ *
+ * @param {D1Database} db
+ * @param {KVNamespace} kv
+ * @param {string[]} urls
+ * @returns {Promise<Map<string, object>>} Map of url → { ...record, circuitOpen }
+ */
+export async function batchGetFeedHealthRecords(db, kv, urls) {
+  if (!urls || urls.length === 0) return new Map();
+
+  const hashes = urls.map(urlKey);
+  const urlByHash = new Map(urls.map((u, i) => [hashes[i], u]));
+
+  try {
+    const placeholders = hashes.map(() => "?").join(",");
+
+    // Single D1 read for all hashes + parallel KV circuit checks
+    const [rowsResult, circuitFlags] = await Promise.all([
+      db
+        .prepare(
+          `SELECT * FROM feed_health WHERE url_hash IN (${placeholders})`,
+        )
+        .bind(...hashes)
+        .all(),
+      Promise.all(urls.map((url) => isFeedCircuitOpen(kv, url))),
+    ]);
+
+    // Build a lookup by hash for D1 rows
+    const rowByHash = new Map();
+    for (const row of rowsResult.results || []) {
+      rowByHash.set(row.url_hash, rowToRecord(row));
+    }
+
+    // Assemble result map: url → { ...record, circuitOpen }
+    const result = new Map();
+    urls.forEach((url, i) => {
+      const hash = hashes[i];
+      const record = rowByHash.get(hash) || defaultRecord(url);
+      result.set(url, { ...record, circuitOpen: circuitFlags[i] });
+    });
+
+    return result;
+  } catch (err) {
+    logger.warn(
+      `[FeedHealth] batchGetFeedHealthRecords failed: ${err.message}. Falling back to defaults.`,
+    );
+    // Safe fallback: return defaults (circuits open = false) so no sources are dropped
+    return new Map(
+      urls.map((url) => [url, { ...defaultRecord(url), circuitOpen: false }]),
+    );
+  }
+}
+
+/**
  * Manually reset a feed's circuit breaker (for admin use).
  *
  * CHANGED: Now takes (db, kv, feedUrl) instead of (kv, feedUrl).
